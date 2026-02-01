@@ -1,122 +1,140 @@
-var r = "*";
-var i = "//";
-var c = "/";
-var o = "?";
-var a = "#";
+var WILDCARD = "*";
+var DOUBLE_SLASH = "//";
+var SLASH = "/";
+var QUESTION_MARK = "?";
+var HASH = "#";
+
 var s = {
-  matchesPattern: function (n, e) {
-    return !!e && !!n && (e.indexOf(r) > -1 ? this.wildcardMatch(n, e) : n.indexOf(e) > -1);
+  // check if a string matches a pattern (supports wildcard *)
+  matchesPattern: function (str, pattern) {
+    return !!pattern && !!str && (pattern.indexOf(WILDCARD) > -1 ? this.wildcardMatch(str, pattern) : str.indexOf(pattern) > -1);
   },
-  wildcardMatch: function (n, e) {
-    for (var t = e.split("*"), r = 0, i = 0; i < t.length; i++) {
-      var c = t[i];
-      if (c !== "") {
-        var o = n.indexOf(c, r);
-        if (o === -1) {
+  // "api.*.com" matches "api.example.com" — splits on * and checks each part appears in order
+  wildcardMatch: function (str, pattern) {
+    var parts = pattern.split("*");
+    var searchFrom = 0;
+    for (var i = 0; i < parts.length; i++) {
+      var segment = parts[i];
+      if (segment !== "") {
+        var index = str.indexOf(segment, searchFrom);
+        if (index === -1) {
           return false;
         }
-        r = o + c.length;
+        searchFrom = index + segment.length;
       }
     }
     return true;
   },
-  urlStrictlyMatchesPattern: function (n, e, t) {
-    var r = this;
-    return Object.keys(t).filter(function (n) {
-      return n !== "strict";
-    }).every(function (i) {
-      switch (i) {
+  // strict mode: ALL specified fields (url, host, path, query, fragment) must match
+  urlStrictlyMatchesPattern: function (fullUrl, parsedParts, patternConfig) {
+    var self = this;
+    return Object.keys(patternConfig).filter(function (key) {
+      return key !== "strict";
+    }).every(function (key) {
+      switch (key) {
         case "url":
-          return r.matchesPattern(n, t[i]);
+          return self.matchesPattern(fullUrl, patternConfig[key]);
         case "host":
         case "fragment":
         case "path":
         case "query":
-          return r.matchesPattern(e[i], t[i]);
+          return self.matchesPattern(parsedParts[key], patternConfig[key]);
         default:
           return false;
       }
     });
   },
-  matchURLParts: function (n, e) {
-    if (typeof e != "string") {
+
+  // parse a URL into parts (host, path, query, fragment) and match against a pattern config
+  matchURLParts: function (patternConfig, url) {
+    if (typeof url != "string") {
       return false;
     }
-    if (n.host == null && n.path == null && n.query == null && n.fragment == null) {
-      return n.url != null && this.matchesPattern(e, n.url);
+    // simple mode: just match the full URL string
+    if (patternConfig.host == null && patternConfig.path == null && patternConfig.query == null && patternConfig.fragment == null) {
+      return patternConfig.url != null && this.matchesPattern(url, patternConfig.url);
     }
-    var t;
-    var r = {
-      host: "",
-      path: "",
-      query: "",
-      fragment: ""
-    };
-    var s = e.indexOf(i);
-    if (e.indexOf("://") > -1 || s === 0) {
-      var f = (t = e.slice(s + i.length)).indexOf(c);
-      r.host = t.slice(0, f > -1 ? f : undefined);
+
+    // parse the URL into parts
+    var afterProtocol;
+    var parts = { host: "", path: "", query: "", fragment: "" };
+    var doubleSlashIndex = url.indexOf(DOUBLE_SLASH);
+
+    if (url.indexOf("://") > -1 || doubleSlashIndex === 0) {
+      afterProtocol = url.slice(doubleSlashIndex + DOUBLE_SLASH.length);
+      var slashIndex = afterProtocol.indexOf(SLASH);
+      parts.host = afterProtocol.slice(0, slashIndex > -1 ? slashIndex : undefined);
     } else {
-      t = e;
-      r.host = document.location.host;
+      afterProtocol = url;
+      parts.host = document.location.host;
     }
-    var u = t.indexOf(c);
-    var h = t.indexOf(o);
-    var l = t.indexOf(a);
-    var w = u > -1 ? u : 0;
-    if (h > -1) {
-      r.path ||= t.slice(w, h);
-      r.query = t.slice(h, l > -1 ? l : undefined);
+
+    var pathStart = afterProtocol.indexOf(SLASH);
+    var queryStart = afterProtocol.indexOf(QUESTION_MARK);
+    var hashStart = afterProtocol.indexOf(HASH);
+    var pathFrom = pathStart > -1 ? pathStart : 0;
+
+    if (queryStart > -1) {
+      parts.path ||= afterProtocol.slice(pathFrom, queryStart);
+      parts.query = afterProtocol.slice(queryStart, hashStart > -1 ? hashStart : undefined);
     }
-    if (l > -1) {
-      r.path ||= t.slice(w, l);
-      r.fragment = t.slice(l);
+    if (hashStart > -1) {
+      parts.path ||= afterProtocol.slice(pathFrom, hashStart);
+      parts.fragment = afterProtocol.slice(hashStart);
     }
-    r.path ||= t.slice(w);
-    if (n.strict) {
-      return this.urlStrictlyMatchesPattern(e, r, n);
+    parts.path ||= afterProtocol.slice(pathFrom);
+
+    if (patternConfig.strict) {
+      return this.urlStrictlyMatchesPattern(url, parts, patternConfig);
     } else {
-      return this.matchesPattern(r.host, n.host) || this.matchesPattern(r.path, n.path) || this.matchesPattern(r.query, n.query) || this.matchesPattern(r.fragment, n.fragment) || this.matchesPattern(e, n.url);
+      // non-strict: ANY field matching is enough
+      return this.matchesPattern(parts.host, patternConfig.host) || this.matchesPattern(parts.path, patternConfig.path) || this.matchesPattern(parts.query, patternConfig.query) || this.matchesPattern(parts.fragment, patternConfig.fragment) || this.matchesPattern(url, patternConfig.url);
     }
   },
-  matchURLConfig: function (n, e, t) {
-    if (n == null) {
+  // main entry point: check if a URL matches the inclusion list but NOT the exclusion list
+  matchURLConfig: function (url, inclusionPatterns, exclusionPatterns) {
+    if (url == null) {
       return false;
     }
-    if (Array.isArray(t)) {
-      for (var r = 0; r < t.length; ++r) {
-        var i = t[r];
-        if (this.matchURLParts(i, n)) {
+    // check exclusions first
+    if (Array.isArray(exclusionPatterns)) {
+      for (var i = 0; i < exclusionPatterns.length; ++i) {
+        if (this.matchURLParts(exclusionPatterns[i], url)) {
           return false;
         }
       }
     }
-    if (Array.isArray(e)) {
-      for (var c = 0; c < e.length; ++c) {
-        var o = e[c];
-        if (this.matchURLParts(o, n)) {
+    // then check inclusions
+    if (Array.isArray(inclusionPatterns)) {
+      for (var j = 0; j < inclusionPatterns.length; ++j) {
+        if (this.matchURLParts(inclusionPatterns[j], url)) {
           return true;
         }
       }
     }
     return false;
   },
+
   isAbsoluteUrl: function (n) {
     return typeof n == "string" && (n.indexOf("://") !== -1 || n.indexOf("//") === 0);
   },
-  hasDatadomeDomain: function (n) {
-    if (!this.isAbsoluteUrl(n)) {
+  // check if a URL belongs to datadome's own domains
+  hasDatadomeDomain: function (url) {
+    if (!this.isAbsoluteUrl(url)) {
       return false;
     }
-    var e = n.split("/")[2];
-    e = (e = (e = (e = e.split(":")[0]).split("?")[0]).split("#")[0]).split(".").slice(-2).join(".");
-    for (var t = ["datado.me", "captcha-delivery.com"], r = 0; r < t.length; r++) {
-      if (e === t[r]) {
+    var hostPart = url.split("/")[2]; // "https://example.com:8080/path" => "example.com:8080"
+    var rootDomain = hostPart.split(":")[0].split("?")[0].split("#")[0].split(".").slice(-2).join(".");
+    var datadomeDomains = ["datado.me", "captcha-delivery.com"];
+    for (var i = 0; i < datadomeDomains.length; i++) {
+      if (rootDomain === datadomeDomains[i]) {
         return true;
       }
     }
     return false;
   },
+
+
   getHostname: function (n) {
     var e = "https://";
     if (typeof n != "string" || n.indexOf(e) !== 0) {
@@ -125,36 +143,47 @@ var s = {
       return n.replace(e, "").split("/")[0];
     }
   },
-  isFpOrigin: function (n) {
-    var e = this.getHostname(n);
-    var t = this.getHostname(window.location.href);
-    if (!e || !t) {
+  // check if a URL is a first-party DataDome endpoint (ddc.example.com where example.com is the current site)
+  isFpOrigin: function (url) {
+    var urlHostname = this.getHostname(url);
+    var pageHostname = this.getHostname(window.location.href);
+    if (!urlHostname || !pageHostname) {
       return false;
     }
-    for (var r = e.split(".").reverse(), i = t.split(".").reverse(), c = 0, o = 0; o < i.length && r[o] === i[o]; ++o) {
-      ++c;
+    // compare domain parts from right to left
+    var urlParts = urlHostname.split(".").reverse();
+    var pageParts = pageHostname.split(".").reverse();
+    var matchCount = 0;
+    for (var i = 0; i < pageParts.length && urlParts[i] === pageParts[i]; ++i) {
+      ++matchCount;
     }
-    return c >= 2 && r[c] === "ddc";
+    // must share at least 2 labels (domain.tld) and the next label in the URL must be "ddc"
+    return matchCount >= 2 && urlParts[matchCount] === "ddc";
   },
   isTrustedOrigin: function (n) {
     return this.hasDatadomeDomain(n) || this.isFpOrigin(n);
   },
-  getRequestURL: function (n) {
-    var e = false;
-    var t = false;
+
+  // extract the URL string from a Request object, URL object, or plain string
+  getRequestURL: function (input) {
+    var isRequest = false;
+    var isURL = false;
     if (window.URL && typeof window.URL == "function") {
-      t = n instanceof URL;
+      isURL = input instanceof URL;
     }
     if (window.Request && typeof window.Request == "function") {
-      e = n instanceof Request;
+      isRequest = input instanceof Request;
     }
-    if (e) {
-      return n.url;
-    } else if (t) {
-      return n.href;
+    if (isRequest) {
+      return input.url;
+    } else if (isURL) {
+      return input.href;
     } else {
-      return n;
+      return input;
     }
-  }
+  },
+
 };
+
+
 module.exports = s;
