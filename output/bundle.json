@@ -1,0 +1,58 @@
+{
+  "type": "browserify",
+  "entryId": "9",
+  "modules": [
+    {
+      "id": "1",
+      "path": "node_modules/detection-js/dist/jstag/index.js"
+    },
+    {
+      "id": "2",
+      "path": "DetectionWrapper.js"
+    },
+    {
+      "id": "3",
+      "path": "common/DataDomeOptions.js"
+    },
+    {
+      "id": "4",
+      "path": "common/DataDomeTools.js"
+    },
+    {
+      "id": "5",
+      "path": "common/DataDomeUrlTools.js"
+    },
+    {
+      "id": "6",
+      "path": "fingerprint/DataDomeAnalyzer.js"
+    },
+    {
+      "id": "7",
+      "path": "http/DataDomeRequest.js"
+    },
+    {
+      "id": "8",
+      "path": "http/DataDomeResponse.js"
+    },
+    {
+      "id": "9",
+      "path": "index.js"
+    },
+    {
+      "id": "10",
+      "path": "live-events/DataDomeAsyncChallengesTracking.js"
+    },
+    {
+      "id": "11",
+      "path": "live-events/DataDomeEventsTracking.js"
+    },
+    {
+      "id": "12",
+      "path": "services/DataDomeApiClient.js"
+    },
+    {
+      "id": "13",
+      "path": "services/DataDomeServiceWorker.js"
+    }
+  ]
+}
