@@ -1,46 +1,56 @@
-var r = require("./common/DataDomeTools");
-module.exports = function (e) {
-  var t;
-  var i;
-  var c;
-  var o = true;
+var DataDomeTools = require("./common/DataDomeTools");
+module.exports = function (dryRun) {
+  var detectionModule;
+  var detectionResult;
+  var detectionApi;
+  var isLoading = true;
+
+  // load detection module (deferred)
   setTimeout(function () {
-    t = require("detection-js/dist/jstag");
+    detectionModule = require("detection-js/dist/jstag");
   });
+
+  // initialize detection module (deferred, runs after load)
   setTimeout(function () {
-    let n = {};
-    if (e && Array.isArray(e) && e.indexOf(5) > -1) {
-      n.dww = true;
+    var options = {};
+    if (dryRun && Array.isArray(dryRun) && dryRun.indexOf(5) > -1) {
+      options.dww = true; // disable web worker
     }
-    i = t(n);
-    c = i[2];
-    o = false;
+    detectionResult = detectionModule(options);
+    detectionApi = detectionResult[2];
+    isLoading = false;
   });
-  this.i = function (n, e) {
-    function t() {
+
+  // add a key/value pair to the fingerprint data
+  this.i = function (key, value) {
+    function send() {
       try {
-        (0, c[1])(n, e);
-      } catch (n) {}
+        (0, detectionApi[1])(key, value);
+      } catch (e) { }
     }
-    if (o) {
-      setTimeout(t);
+    if (isLoading) {
+      setTimeout(send);
     } else {
-      t();
+      send();
     }
   };
-  this.o = function (n) {
-    return (0, c[2])(n);
+
+  // retrieve detection data
+  this.o = function (arg) {
+    return (0, detectionApi[2])(arg);
   };
+
+  // start detection: run fingerprinting, then dispatch event when done
   this.u = function () {
     window.addEventListener("datadome-det-d", function () {
-      (0, i[1])();
+      (0, detectionResult[1])();
       setTimeout(function () {
-        new r().dispatchEvent("datadome-jstag-ch");
+        new DataDomeTools().dispatchEvent("datadome-jstag-ch");
       });
     }, {
       capture: true,
       once: true
     });
-    (0, i[0])();
+    (0, detectionResult[0])();
   };
 };

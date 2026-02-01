@@ -45,7 +45,7 @@ var DataDomeTools = require("./common/DataDomeTools");
     function execute() {
       try {
         fn.apply(context, args);
-      } catch (e) {}
+      } catch (e) { }
     }
     if (options && options.useIdleCallback && typeof window.requestIdleCallback == "function") {
       requestIdleCallback(execute, {
@@ -74,7 +74,7 @@ var DataDomeTools = require("./common/DataDomeTools");
             sessionStorage.removeItem("ddOriginalReferrer");
           }
         }
-      } catch (e) {}
+      } catch (e) { }
     })();
 
     // initialize config
