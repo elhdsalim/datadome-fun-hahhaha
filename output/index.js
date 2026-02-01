@@ -1,137 +1,163 @@
-var r = require("./DetectionWrapper");
-var i = require("./common/DataDomeTools");
+var DetectionWrapper = require("./DetectionWrapper");
+var DataDomeTools = require("./common/DataDomeTools");
+
+
 (function () {
-  var e = new i();
-  function t(e) {
+  var tools = new DataDomeTools();
+
+  function exposeCaptchaFunction(wrapper) {
     if (window.dataDomeOptions.exposeCaptchaFunction === true) {
-      var t = new (require("./http/DataDomeResponse"))(e).displayResponsePagePublic;
-      window.displayDataDomeCaptchaPage = t;
-      window.displayDataDomeResponsePage = t;
+      var displayFn = new (require("./http/DataDomeResponse"))(wrapper).displayResponsePagePublic;
+      window.displayDataDomeCaptchaPage = displayFn;
+      window.displayDataDomeResponsePage = displayFn;
     }
   }
-  function c(e, t) {
-    if (e.indexOf(1) === -1) {
-      new (require("./services/DataDomeApiClient"))(t).processSyncRequest();
+
+  function processSyncRequest(dryRun, wrapper) {
+    if (dryRun.indexOf(1) === -1) {
+      new (require("./services/DataDomeApiClient"))(wrapper).processSyncRequest();
     }
   }
-  function o(e, t) {
-    if (e.indexOf(3) === -1 && window.dataDomeOptions.eventsTrackingEnabled) {
-      new (0, require("./live-events/DataDomeEventsTracking").DataDomeEventsTracking)(t, false).process();
+
+  function processEventsTracking(dryRun, wrapper) {
+    if (dryRun.indexOf(3) === -1 && window.dataDomeOptions.eventsTrackingEnabled) {
+      new (0, require("./live-events/DataDomeEventsTracking").DataDomeEventsTracking)(wrapper, false).process();
     }
   }
-  function a(e, t) {
-    if (e.indexOf(4) === -1) {
-      new (require("./live-events/DataDomeAsyncChallengesTracking"))(t).process();
+
+  function processAsyncChallenges(dryRun, wrapper) {
+    if (dryRun.indexOf(4) === -1) {
+      new (require("./live-events/DataDomeAsyncChallengesTracking"))(wrapper).process();
     }
   }
-  function s(e, t) {
-    if (e.enableServiceWorkerPlugin) {
-      new (require("./services/DataDomeServiceWorker"))(e, t, {
-        dataDomeResponse: new (require("./http/DataDomeResponse"))(e, jsData)
+
+  function initServiceWorker(options, jsKey) {
+    if (options.enableServiceWorkerPlugin) {
+      new (require("./services/DataDomeServiceWorker"))(options, jsKey, {
+        dataDomeResponse: new (require("./http/DataDomeResponse"))(options, jsData)
       }).initListener();
     }
   }
-  function f(n, e, t) {
-    var r = this;
-    function i() {
+
+  // run a function asynchronously via requestIdleCallback (if available) or setTimeout
+  function runDeferred(fn, args, options) {
+    var context = this;
+    function execute() {
       try {
-        n.apply(r, e);
-      } catch (n) {}
+        fn.apply(context, args);
+      } catch (e) {}
     }
-    if (t && t.useIdleCallback && typeof window.requestIdleCallback == "function") {
-      requestIdleCallback(i, {
+    if (options && options.useIdleCallback && typeof window.requestIdleCallback == "function") {
+      requestIdleCallback(execute, {
         timeout: 2000
       });
     } else {
-      setTimeout(i, 0);
+      setTimeout(execute, 0);
     }
   }
+
+  // only run once per page
   if (!window.dataDomeProcessed && (window.dataDomeProcessed = true, 1)) {
+
+    // restore original referrer after a challenge redirect
     (function () {
       try {
         if (window.sessionStorage) {
-          var n = sessionStorage.getItem("ddOriginalReferrer");
-          if (n) {
+          var originalReferrer = sessionStorage.getItem("ddOriginalReferrer");
+          if (originalReferrer) {
             Object.defineProperty(document, "referrer", {
               configurable: true,
               get: function () {
-                return n;
+                return originalReferrer;
               }
             });
             sessionStorage.removeItem("ddOriginalReferrer");
           }
         }
-      } catch (n) {}
+      } catch (e) {}
     })();
+
+    // initialize config
     window.dataDomeOptions = new (require("./common/DataDomeOptions"))();
     window.ddShouldSkipFingerPrintReq = false;
     window.dataDomeOptions.check(window.ddoptions);
-    var u = function (n) {
-      if (Array.isArray(n)) {
-        return n;
+
+    // dryRun: array of module IDs to skip (1=sync, 2=async, 3=events, 4=challenges)
+    var dryRun = function (val) {
+      if (Array.isArray(val)) {
+        return val;
       } else {
         return [];
       }
     }(window.dataDomeOptions.dryRun);
-    var h = new r(u);
-    (function (n) {
+
+    var wrapper = new DetectionWrapper(dryRun);
+
+    // 5% telemetry: send site's ddoptions and ddCaptchaOptions to DataDome
+    (function (wrapper) {
       if (Math.random() <= 0.05) {
-        var e;
-        var t;
+        var ddOptionsStr;
+        var captchaOptionsStr;
         try {
-          var r = window.ddoptions;
-          e = r ? JSON.stringify(r) : "";
-        } catch (n) {
-          e = "error";
+          var opts = window.ddoptions;
+          ddOptionsStr = opts ? JSON.stringify(opts) : "";
+        } catch (e) {
+          ddOptionsStr = "error";
         }
-        n.i("opts", e);
+        wrapper.i("opts", ddOptionsStr);
         try {
-          var i = window.ddCaptchaOptions;
-          t = i ? JSON.stringify(i) : "";
-        } catch (n) {
-          t = "error";
+          var captchaOpts = window.ddCaptchaOptions;
+          captchaOptionsStr = captchaOpts ? JSON.stringify(captchaOpts) : "";
+        } catch (e) {
+          captchaOptionsStr = "error";
         }
-        n.i("xhr_opts", t);
+        wrapper.i("xhr_opts", captchaOptionsStr);
       }
-    })(h);
-    (function (e, t) {
-      if (e.indexOf(2) === -1 && (window.dataDomeOptions.ajaxListenerPath != null || !!window.dataDomeOptions.isSalesforce)) {
-        new (require("./services/DataDomeApiClient"))(t).processAsyncRequests(window.dataDomeOptions.ajaxListenerPath, window.dataDomeOptions.ajaxListenerPathExclusion, window.dataDomeOptions.abortAsyncOnChallengeDisplay, !window.dataDomeOptions.exposeCaptchaFunction, window.dataDomeOptions.isSalesforce);
+    })(wrapper);
+
+    // intercept XHR/fetch if ajaxListenerPath is configured
+    (function (dryRun, wrapper) {
+      if (dryRun.indexOf(2) === -1 && (window.dataDomeOptions.ajaxListenerPath != null || !!window.dataDomeOptions.isSalesforce)) {
+        new (require("./services/DataDomeApiClient"))(wrapper).processAsyncRequests(window.dataDomeOptions.ajaxListenerPath, window.dataDomeOptions.ajaxListenerPathExclusion, window.dataDomeOptions.abortAsyncOnChallengeDisplay, !window.dataDomeOptions.exposeCaptchaFunction, window.dataDomeOptions.isSalesforce);
       }
-    })(u, h);
+    })(dryRun, wrapper);
+
+    // if sessionByHeader mode, copy cookie to localStorage
     (function () {
       if (window.ddSbh) {
-        var n = e.getCookie("datadome", document.cookie);
-        if (n != null && e.isLocalStorageEnabled()) {
-          window.localStorage.setItem(window.dataDomeOptions.ddCookieSessionName, n);
+        var cookieValue = tools.getCookie("datadome", document.cookie);
+        if (cookieValue != null && tools.isLocalStorageEnabled()) {
+          window.localStorage.setItem(window.dataDomeOptions.ddCookieSessionName, cookieValue);
         }
       }
     })();
-    f(function () {
-      function n() {
-        f(a, [u, h], {
+
+    // launch all modules (deferred)
+    runDeferred(function () {
+      function launchModules() {
+        runDeferred(processAsyncChallenges, [dryRun, wrapper], {
           useIdleCallback: true
         });
-        f(s, [window.dataDomeOptions, window.ddjskey], {
+        runDeferred(initServiceWorker, [window.dataDomeOptions, window.ddjskey], {
           useIdleCallback: true
         });
-        f(c, [u, h], {
+        runDeferred(processSyncRequest, [dryRun, wrapper], {
           useIdleCallback: true
         });
-        f(o, [u, h], {
+        runDeferred(processEventsTracking, [dryRun, wrapper], {
           useIdleCallback: true
         });
-        f(t, [h], {
+        runDeferred(exposeCaptchaFunction, [wrapper], {
           useIdleCallback: true
         });
         if (window.dataDomeOptions.enableTagEvents) {
-          e.dispatchEvent(e.eventNames.ready);
+          tools.dispatchEvent(tools.eventNames.ready);
         }
       }
       if (window.dataDomeOptions.deferSignals && document.readyState !== "complete") {
-        window.addEventListener("load", n);
+        window.addEventListener("load", launchModules);
       } else {
-        n();
+        launchModules();
       }
     });
   }
