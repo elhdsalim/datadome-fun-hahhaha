@@ -1,47 +1,52 @@
-module.exports = function (n, e, t) {
-  var r = t.dataDomeResponse;
-  var i = 3;
-  function c() {
+module.exports = function (options, jsKey, dependencies) {
+  var dataDomeResponse = dependencies.dataDomeResponse;
+  var retryCount = 3;
+
+  // establish a MessageChannel with the DataDome service worker
+  function connectToServiceWorker() {
     try {
       if (!window.DataDomeServiceWorkerConnected && window.MessageChannel && navigator.serviceWorker.controller && navigator.serviceWorker.controller.postMessage) {
-        var t = new MessageChannel();
-        if (t.port1 && t.port2) {
+        var channel = new MessageChannel();
+        if (channel.port1 && channel.port2) {
           navigator.serviceWorker.controller.postMessage({
             type: "INIT_PORT",
-            dataDomeOptions: JSON.stringify(n),
-            clientSideKey: e
-          }, [t.port2]);
-          t.port1.onmessage = function (n) {
-            (function (n) {
+            dataDomeOptions: JSON.stringify(options),
+            clientSideKey: jsKey
+          }, [channel.port2]);
+
+          // listen for challenge responses from the service worker
+          channel.port1.onmessage = function (event) {
+            (function (message) {
               try {
-                if (n.data && n.data.responsePageUrl) {
-                  r.displayResponsePage({
-                    responsePageUrl: n.data.responsePageUrl
+                if (message.data && message.data.responsePageUrl) {
+                  dataDomeResponse.displayResponsePage({
+                    responsePageUrl: message.data.responsePageUrl
                   });
                 }
-              } catch (n) {}
-            })(n);
+              } catch (err) {}
+            })(event);
           };
           window.DataDomeServiceWorkerConnected = true;
         }
-      } else if (i > 0) {
+      } else if (retryCount > 0) {
         setTimeout(function () {
-          c();
-          i--;
+          connectToServiceWorker();
+          retryCount--;
         }, 300);
       }
-    } catch (n) {}
+    } catch (err) {}
   }
+
   this.initListener = function () {
     if (typeof window != "undefined" && window.navigator && "serviceWorker" in window.navigator) {
       try {
         navigator.serviceWorker.ready.then(function () {
-          c();
-        }).catch(function (n) {});
+          connectToServiceWorker();
+        }).catch(function (err) {});
         if (navigator.serviceWorker.controller) {
-          c();
+          connectToServiceWorker();
         }
-      } catch (n) {}
+      } catch (err) {}
     }
   };
 };

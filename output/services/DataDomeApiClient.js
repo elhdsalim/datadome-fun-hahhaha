@@ -1,377 +1,425 @@
-var r = require("../fingerprint/DataDomeAnalyzer.js");
-var i = require("../http/DataDomeRequest.js");
-var c = require("../http/DataDomeResponse.js");
-var o = require("../common/DataDomeTools.js");
-var a = 2048;
-var s = false;
-var f = false;
-module.exports = function (e) {
-  var t = "x-datadome-clientid";
-  var u = "x-set-cookie";
-  var h = "x-sf-cc-x-set-cookie";
-  var l = new o();
+var DataDomeAnalyzer = require("../fingerprint/DataDomeAnalyzer.js");
+var DataDomeRequest = require("../http/DataDomeRequest.js");
+var DataDomeResponse = require("../http/DataDomeResponse.js");
+var DataDomeTools = require("../common/DataDomeTools.js");
+var MAX_ARRAYBUFFER_DECODE = 2048;
+var fetchReplayInProgress = false;
+var xhrReplayInProgress = false;
+module.exports = function (wrapper) {
+  var DD_CLIENT_ID_HEADER = "x-datadome-clientid";
+  var SET_COOKIE_HEADER = "x-set-cookie";
+  var SF_SET_COOKIE_HEADER = "x-sf-cc-x-set-cookie";
+  var tools = new DataDomeTools();
+
+  // sync mode: run fingerprint analyzer, then send data on detection complete
   this.processSyncRequest = function () {
-    var n = new r(e);
-    var t = false;
+    var analyzer = new DataDomeAnalyzer(wrapper);
+    var hasSent = false;
     window.addEventListener("datadome-jstag-ch", function () {
-      if (!t) {
-        t = true;
-        var n = new i("ch");
+      if (!hasSent) {
+        hasSent = true;
+        var request = new DataDomeRequest("ch");
         if (window.dataDomeOptions) {
-          n.requestApi(window.ddjskey, e, [], window.dataDomeOptions.patternToRemoveFromReferrerUrl, true, window.dataDomeOptions.ddResponsePage);
+          request.requestApi(window.ddjskey, wrapper, [], window.dataDomeOptions.patternToRemoveFromReferrerUrl, true, window.dataDomeOptions.ddResponsePage);
         }
       }
     }, {
       capture: true,
       once: true
     });
-    n.process();
+    analyzer.process();
   };
-  this.processAsyncRequests = function (r, i, o, w, d) {
-    var v = require("../common/DataDomeUrlTools.js");
-    var b = this;
+
+  // async mode: monkey-patch XHR and fetch to intercept responses and inject challenges
+  this.processAsyncRequests = function (inclusionPatterns, exclusionPatterns, shouldAbort, shouldDisplay, isSalesforce) {
+    var DataDomeUrlTools = require("../common/DataDomeUrlTools.js");
+    var self = this;
     if (window.XMLHttpRequest) {
-      var y = XMLHttpRequest.prototype.setRequestHeader;
+      var originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+
+      // patch setRequestHeader to save original headers for replay
       if (window.dataDomeOptions.replayAfterChallenge) {
-        XMLHttpRequest.prototype.setRequestHeader = function (n, e) {
+        XMLHttpRequest.prototype.setRequestHeader = function (header, value) {
           this._datadome = this._datadome || {};
           this._datadome.originalRequestHeaders ||= [];
-          if (!f && n !== t) {
+          if (!xhrReplayInProgress && header !== DD_CLIENT_ID_HEADER) {
             this._datadome.originalRequestHeaders.push({
-              header: n,
-              value: e
+              header: header,
+              value: value
             });
           }
-          y.call(this, n, e);
+          originalSetRequestHeader.call(this, header, value);
         };
-        var p = XMLHttpRequest.prototype.send;
+
+        // patch send to save original args for replay
+        var originalSend = XMLHttpRequest.prototype.send;
         XMLHttpRequest.prototype.send = function () {
           this._datadome = this._datadome || {};
           this._datadome.originalSendArgs = Array.prototype.slice.call(arguments);
-          p.apply(this, arguments);
+          originalSend.apply(this, arguments);
         };
       }
-      var m = XMLHttpRequest.prototype.open;
+
+      // patch open to intercept responses and inject session header
+      var originalOpen = XMLHttpRequest.prototype.open;
       XMLHttpRequest.prototype.open = function () {
         this._datadome = this._datadome || {};
         this._datadome.originalOpenArgs = Array.prototype.slice.call(arguments);
-        var n = window.dataDomeOptions.replayAfterChallenge;
+        var replayEnabled = window.dataDomeOptions.replayAfterChallenge;
         if (this.addEventListener !== undefined) {
-          if (n) {
-            this.addEventListener("readystatechange", function (n) {
-              var e = n.currentTarget;
-              if (e.readyState === 2 && typeof e.onload == "function") {
-                var t = b.filterAsyncResponse(e.responseURL, r, i, d);
-                var c = e.getAllResponseHeaders();
-                var o = l.getDataDomeChallengeType(c);
-                if (t && o != null) {
-                  e._datadome.onload = e.onload;
-                  e.onload = null;
+
+          // if replay enabled, intercept at HEADERS_RECEIVED to save onload before challenge
+          if (replayEnabled) {
+            this.addEventListener("readystatechange", function (event) {
+              var xhr = event.currentTarget;
+              if (xhr.readyState === 2 && typeof xhr.onload == "function") {
+                var matchesFilter = self.filterAsyncResponse(xhr.responseURL, inclusionPatterns, exclusionPatterns, isSalesforce);
+                var responseHeaders = xhr.getAllResponseHeaders();
+                var challengeType = tools.getDataDomeChallengeType(responseHeaders);
+                if (matchesFilter && challengeType != null) {
+                  xhr._datadome.onload = xhr.onload;
+                  xhr.onload = null;
                 }
               }
             });
           }
-          this.addEventListener("load", function (s) {
-            var v = s.currentTarget;
-            var y = v.getAllResponseHeaders();
-            l.getCookie("datadome");
-            if (v.responseType === "text" || v.responseType === "" || v.responseType === "json" || v.responseType === "blob" || v.responseType === "arraybuffer") {
-              var p = b.filterAsyncResponse(v.responseURL, r, i, d);
-              if (p) {
+
+          // on load: check for challenge in response, handle session cookies, replay if needed
+          this.addEventListener("load", function (loadEvent) {
+            var xhr = loadEvent.currentTarget;
+            var responseHeaders = xhr.getAllResponseHeaders();
+            tools.getCookie("datadome");
+            if (xhr.responseType === "text" || xhr.responseType === "" || xhr.responseType === "json" || xhr.responseType === "blob" || xhr.responseType === "arraybuffer") {
+              var matchesFilter = self.filterAsyncResponse(xhr.responseURL, inclusionPatterns, exclusionPatterns, isSalesforce);
+
+              // handle session-by-header cookie extraction
+              if (matchesFilter) {
                 if (window.ddSbh) {
-                  var m = l.findXHRHeaderValue(y, h) || l.findXHRHeaderValue(y, u);
-                  if (window.ddSbh && m != null) {
-                    l.setDDSession(m);
+                  var setCookieValue = tools.findXHRHeaderValue(responseHeaders, SF_SET_COOKIE_HEADER) || tools.findXHRHeaderValue(responseHeaders, SET_COOKIE_HEADER);
+                  if (window.ddSbh && setCookieValue != null) {
+                    tools.setDDSession(setCookieValue);
                   }
-                  if (m && l.hasPartitionedAttribute(m)) {
-                    var F = l.getCookieDomainFromCookie(m);
-                    if (F) {
-                      l.removeUnpartitionedCookieIfPartitionedOneIsPresent(F);
+                  if (setCookieValue && tools.hasPartitionedAttribute(setCookieValue)) {
+                    var cookieDomain = tools.getCookieDomainFromCookie(setCookieValue);
+                    if (cookieDomain) {
+                      tools.removeUnpartitionedCookieIfPartitionedOneIsPresent(cookieDomain);
                     }
                   }
                 } else {
-                  l.removeUnpartitionedCookieIfPartitionedOneIsPresent();
+                  tools.removeUnpartitionedCookieIfPartitionedOneIsPresent();
                 }
               }
-              var L = l.getDataDomeChallengeType(y);
-              if (L || p) {
-                var U = new c(e);
-                function A(e) {
-                  if (U.process(e, o, w, v, d, v.responseURL, L) && !f && n && v._datadome.originalRequestHeaders && v._datadome.originalSendArgs && v._datadome.originalOpenArgs) {
-                    if (typeof v.onloadend == "function") {
-                      v._datadome.onloadend = v.onloadend;
-                      v.onloadend = null;
+
+              var challengeType = tools.getDataDomeChallengeType(responseHeaders);
+              if (challengeType || matchesFilter) {
+                var responsePage = new DataDomeResponse(wrapper);
+
+                // process the response body based on responseType
+                function processBody(body) {
+                  if (responsePage.process(body, shouldAbort, shouldDisplay, xhr, isSalesforce, xhr.responseURL, challengeType) && !xhrReplayInProgress && replayEnabled && xhr._datadome.originalRequestHeaders && xhr._datadome.originalSendArgs && xhr._datadome.originalOpenArgs) {
+                    if (typeof xhr.onloadend == "function") {
+                      xhr._datadome.onloadend = xhr.onloadend;
+                      xhr.onloadend = null;
                     }
-                    f = true;
-                    window.addEventListener(l.internalEventNames.replayRequest, function n() {
-                      v.abort();
-                      s.stopImmediatePropagation();
-                      s.preventDefault();
-                      v.open.apply(v, v._datadome.originalOpenArgs);
-                      if (v._datadome.originalRequestHeaders) {
-                        v._datadome.originalRequestHeaders.forEach(function (n) {
-                          v.setRequestHeader(n.header, n.value);
+                    xhrReplayInProgress = true;
+
+                    // replay the original request after challenge is passed
+                    window.addEventListener(tools.internalEventNames.replayRequest, function replayHandler() {
+                      xhr.abort();
+                      loadEvent.stopImmediatePropagation();
+                      loadEvent.preventDefault();
+                      xhr.open.apply(xhr, xhr._datadome.originalOpenArgs);
+                      if (xhr._datadome.originalRequestHeaders) {
+                        xhr._datadome.originalRequestHeaders.forEach(function (entry) {
+                          xhr.setRequestHeader(entry.header, entry.value);
                         });
                       }
                       if (window.ddSbh) {
-                        v.setRequestHeader(t, l.getDDSession());
+                        xhr.setRequestHeader(DD_CLIENT_ID_HEADER, tools.getDDSession());
                       }
-                      if (typeof v._datadome.onload == "function") {
-                        v.onload = v._datadome.onload;
+                      if (typeof xhr._datadome.onload == "function") {
+                        xhr.onload = xhr._datadome.onload;
                       }
-                      if (typeof v._datadome.onloadend == "function") {
-                        v.onloadend = v._datadome.onloadend;
+                      if (typeof xhr._datadome.onloadend == "function") {
+                        xhr.onloadend = xhr._datadome.onloadend;
                       }
-                      v.send.apply(v, v._datadome.originalSendArgs);
-                      window.removeEventListener(l.internalEventNames.replayRequest, n);
-                      f = false;
+                      xhr.send.apply(xhr, xhr._datadome.originalSendArgs);
+                      window.removeEventListener(tools.internalEventNames.replayRequest, replayHandler);
+                      xhrReplayInProgress = false;
                     });
                   }
                 }
-                switch (v.responseType) {
+                switch (xhr.responseType) {
                   case "blob":
                     if (typeof FileReader != "undefined") {
-                      var Q = new FileReader();
-                      Q.onload = function (n) {
-                        if (typeof n.target.result == "string") {
-                          A(n.target.result);
+                      var reader = new FileReader();
+                      reader.onload = function (readerEvent) {
+                        if (typeof readerEvent.target.result == "string") {
+                          processBody(readerEvent.target.result);
                         }
                       };
-                      Q.readAsText(v.response);
+                      reader.readAsText(xhr.response);
                     }
                     break;
                   case "json":
-                    A(v.response);
+                    processBody(xhr.response);
                     break;
                   case "text":
                   case "":
-                    A(v.responseText);
+                    processBody(xhr.responseText);
                     break;
                   case "arraybuffer":
-                    if (window.TextDecoder && v.response.byteLength <= a) {
-                      var Y = new TextDecoder("utf-8").decode(v.response);
-                      A(Y);
+                    if (window.TextDecoder && xhr.response.byteLength <= MAX_ARRAYBUFFER_DECODE) {
+                      var decoded = new TextDecoder("utf-8").decode(xhr.response);
+                      processBody(decoded);
                     }
                 }
               }
             }
           });
         }
-        var s = arguments.length ? Array.prototype.slice.call(arguments) : [];
-        if (m) {
-          m.apply(this, s);
+
+        // call original open, then inject session header if needed
+        var openArgs = arguments.length ? Array.prototype.slice.call(arguments) : [];
+        if (originalOpen) {
+          originalOpen.apply(this, openArgs);
         }
         try {
-          if (s.length > 1 && s[1] && (!v.isAbsoluteUrl(s[1]) || b.filterAsyncResponse(s[1], r, i, d)) && (window.dataDomeOptions.withCredentials && (this.withCredentials = true), window.ddSbh)) {
-            var y = l.getDDSession();
+          if (openArgs.length > 1 && openArgs[1] && (!DataDomeUrlTools.isAbsoluteUrl(openArgs[1]) || self.filterAsyncResponse(openArgs[1], inclusionPatterns, exclusionPatterns, isSalesforce)) && (window.dataDomeOptions.withCredentials && (this.withCredentials = true), window.ddSbh)) {
+            var session = tools.getDDSession();
             if (!this._dd_hook) {
-              this.setRequestHeader(t, y);
+              this.setRequestHeader(DD_CLIENT_ID_HEADER, session);
               this._dd_hook = true;
             }
           }
-        } catch (n) {}
+        } catch (err) {}
       };
     }
-    var F = window.dataDomeOptions.overrideAbortFetch;
-    var L = window.Request && typeof window.Request == "function";
-    var U = window.Proxy && typeof window.Proxy == "function";
-    var A = window.Reflect && typeof window.Reflect.construct == "function";
-    if (F && L && U && A) {
+
+    // proxy Request constructor to strip AbortSignal from matching requests
+    var overrideAbortFetch = window.dataDomeOptions.overrideAbortFetch;
+    var hasRequest = window.Request && typeof window.Request == "function";
+    var hasProxy = window.Proxy && typeof window.Proxy == "function";
+    var hasReflect = window.Reflect && typeof window.Reflect.construct == "function";
+    if (overrideAbortFetch && hasRequest && hasProxy && hasReflect) {
       window.Request = new Proxy(window.Request, {
-        construct: function (n, e, t) {
-          if (e.length > 1) {
-            var c = v.getRequestURL(e[0]);
-            if (b.filterAsyncResponse(c, r, i, d) && e[1] != null && e[1].signal) {
+        construct: function (Target, args, newTarget) {
+          if (args.length > 1) {
+            var requestUrl = DataDomeUrlTools.getRequestURL(args[0]);
+            if (self.filterAsyncResponse(requestUrl, inclusionPatterns, exclusionPatterns, isSalesforce) && args[1] != null && args[1].signal) {
               try {
-                delete e[1].signal;
-              } catch (n) {}
+                delete args[1].signal;
+              } catch (err) {}
             }
-            return new n(e[0], e[1]);
+            return new Target(args[0], args[1]);
           }
-          return Reflect.construct(n, e);
+          return Reflect.construct(Target, args);
         }
       });
     }
+
+    // patch fetch to intercept responses and inject session header
     if (window.fetch) {
-      var Q = window.fetch;
+      var originalFetch = window.fetch;
       window.fetch = function () {
-        var n;
-        var a = arguments.length ? Array.prototype.slice.call(arguments) : [];
-        var f = v.getRequestURL(a[0]);
-        if (F && a.length > 1 && a[1] && a[1].signal !== undefined && typeof a[0] == "string" && (!v.isAbsoluteUrl(f) || b.filterAsyncResponse(f, r, i, d))) {
+        var clonedRequest;
+        var fetchArgs = arguments.length ? Array.prototype.slice.call(arguments) : [];
+        var requestUrl = DataDomeUrlTools.getRequestURL(fetchArgs[0]);
+
+        // strip AbortSignal from matching requests if overrideAbortFetch
+        if (overrideAbortFetch && fetchArgs.length > 1 && fetchArgs[1] && fetchArgs[1].signal !== undefined && typeof fetchArgs[0] == "string" && (!DataDomeUrlTools.isAbsoluteUrl(requestUrl) || self.filterAsyncResponse(requestUrl, inclusionPatterns, exclusionPatterns, isSalesforce))) {
           try {
-            delete a[1].signal;
-          } catch (n) {}
+            delete fetchArgs[1].signal;
+          } catch (err) {}
         }
+
+        // inject credentials and session header for matching requests
         if (window.dataDomeOptions.withCredentials || window.ddSbh) {
-          var y;
-          if (typeof a[0] == "string") {
-            y = a[0];
-          } else if (typeof a[0] == "object") {
-            if (typeof a[0].url == "string") {
-              y = a[0].url;
-            } else if (typeof a[0].href == "string") {
-              y = a[0].href;
+          var fetchUrl;
+          if (typeof fetchArgs[0] == "string") {
+            fetchUrl = fetchArgs[0];
+          } else if (typeof fetchArgs[0] == "object") {
+            if (typeof fetchArgs[0].url == "string") {
+              fetchUrl = fetchArgs[0].url;
+            } else if (typeof fetchArgs[0].href == "string") {
+              fetchUrl = fetchArgs[0].href;
             }
           }
-          var p = false;
+          var matchesFilter = false;
           try {
-            p = b.filterAsyncResponse(y, r, i, d);
-          } catch (n) {}
-          if (typeof y == "string" && (!v.isAbsoluteUrl(y) || p)) {
+            matchesFilter = self.filterAsyncResponse(fetchUrl, inclusionPatterns, exclusionPatterns, isSalesforce);
+          } catch (err) {}
+          if (typeof fetchUrl == "string" && (!DataDomeUrlTools.isAbsoluteUrl(fetchUrl) || matchesFilter)) {
+
+            // set credentials: "include" for matching requests
             if (window.dataDomeOptions.withCredentials) {
-              if (typeof a[0] == "object" && typeof a[0].url == "string") {
-                a[0].credentials = "include";
-              } else if (a.length >= 1) {
-                if (a[1] == null) {
-                  var m = [];
-                  for (var L = 0; L < a.length; ++L) {
-                    m[L] = a[L];
+              if (typeof fetchArgs[0] == "object" && typeof fetchArgs[0].url == "string") {
+                fetchArgs[0].credentials = "include";
+              } else if (fetchArgs.length >= 1) {
+                if (fetchArgs[1] == null) {
+                  var argsCopy = [];
+                  for (var idx = 0; idx < fetchArgs.length; ++idx) {
+                    argsCopy[idx] = fetchArgs[idx];
                   }
-                  (a = m)[1] = {};
+                  (fetchArgs = argsCopy)[1] = {};
                 }
-                a[1].credentials = "include";
+                fetchArgs[1].credentials = "include";
               }
             }
+
+            // inject x-datadome-clientid header for session-by-header mode
             if (window.ddSbh) {
-              var U = l.getDDSession();
-              var A = typeof Headers == "function" && typeof Headers.prototype.set == "function";
-              if (typeof a[0] == "object" && typeof a[0].url == "string") {
-                if (!a[0].headers) {
-                  if (A) {
-                    a[0].headers = new Headers();
+              var session = tools.getDDSession();
+              var hasHeadersApi = typeof Headers == "function" && typeof Headers.prototype.set == "function";
+              if (typeof fetchArgs[0] == "object" && typeof fetchArgs[0].url == "string") {
+                if (!fetchArgs[0].headers) {
+                  if (hasHeadersApi) {
+                    fetchArgs[0].headers = new Headers();
                   }
                 }
-                if (a[0].headers) {
-                  a[0].headers.set(t, U);
+                if (fetchArgs[0].headers) {
+                  fetchArgs[0].headers.set(DD_CLIENT_ID_HEADER, session);
                 }
-              } else if (a.length >= 1) {
-                if (a[1] == null) {
-                  var Y = [];
-                  for (var D = 0; D < a.length; ++D) {
-                    Y[D] = a[D];
+              } else if (fetchArgs.length >= 1) {
+                if (fetchArgs[1] == null) {
+                  var argsCopy2 = [];
+                  for (var idx2 = 0; idx2 < fetchArgs.length; ++idx2) {
+                    argsCopy2[idx2] = fetchArgs[idx2];
                   }
-                  (a = Y)[1] = {};
+                  (fetchArgs = argsCopy2)[1] = {};
                 }
-                if (a[1].headers == null) {
-                  a[1].headers = {};
+                if (fetchArgs[1].headers == null) {
+                  fetchArgs[1].headers = {};
                 }
-                if (A && a[1].headers.constructor === Headers) {
-                  a[1].headers.set(t, U);
-                } else if (Array.isArray(a[1].headers)) {
-                  a[1].headers.push([t, U]);
+                if (hasHeadersApi && fetchArgs[1].headers.constructor === Headers) {
+                  fetchArgs[1].headers.set(DD_CLIENT_ID_HEADER, session);
+                } else if (Array.isArray(fetchArgs[1].headers)) {
+                  fetchArgs[1].headers.push([DD_CLIENT_ID_HEADER, session]);
                 } else {
-                  a[1].headers[t] = U;
+                  fetchArgs[1].headers[DD_CLIENT_ID_HEADER] = session;
                 }
               }
             }
           }
         }
-        if (window.dataDomeOptions.replayAfterChallenge && a[0] instanceof Request) {
+
+        // clone Request for potential replay
+        if (window.dataDomeOptions.replayAfterChallenge && fetchArgs[0] instanceof Request) {
           try {
-            n = a[0].clone();
-          } catch (n) {}
+            clonedRequest = fetchArgs[0].clone();
+          } catch (err) {}
         }
-        var R;
-        var j;
-        var H;
-        var G = 250;
+
+        var fetchPromise;
+        var isWindowContext;
+        var fetchError;
+        var MAX_ERROR_LEN = 250;
+
+        // client-specific: force window context for fetch (key: 1F633CDD...)
         if (window.ddjskey === "1F633CDD8EF22541BD6D9B1B8EF13A") {
           try {
-            j = this === window;
-            R = Q.apply(window, a);
-          } catch (n) {
-            H = typeof n.message == "string" ? n.message.slice(0, G) : "errorfetch";
+            isWindowContext = this === window;
+            fetchPromise = originalFetch.apply(window, fetchArgs);
+          } catch (err) {
+            fetchError = typeof err.message == "string" ? err.message.slice(0, MAX_ERROR_LEN) : "errorfetch";
           }
         } else {
           try {
-            R = Q.apply(this, a);
-          } catch (n) {
-            H = typeof n.message == "string" ? n.message.slice(0, G) : "errorfetch";
+            fetchPromise = originalFetch.apply(this, fetchArgs);
+          } catch (err) {
+            fetchError = typeof err.message == "string" ? err.message.slice(0, MAX_ERROR_LEN) : "errorfetch";
           }
         }
-        e.i("nowd", j);
-        e.i("sfex", H);
-        if (a.length > 1 && a[1] && a[1].trustToken || R.then === undefined) {
-          return R;
+        wrapper.i("nowd", isWindowContext);
+        wrapper.i("sfex", fetchError);
+
+        // trust token or non-thenable: return as-is
+        if (fetchArgs.length > 1 && fetchArgs[1] && fetchArgs[1].trustToken || fetchPromise.then === undefined) {
+          return fetchPromise;
         } else {
-          return new Promise(function (t, f) {
-            R.then(function (v) {
+          // wrap the fetch promise to intercept challenge responses
+          return new Promise(function (resolve, reject) {
+            fetchPromise.then(function (response) {
+
+              // handle session-by-header cookie extraction from fetch response
               if (window.ddSbh) {
-                var y = v.headers.get(h) || v.headers.get(u);
-                if (y != null && window.ddSbh) {
+                var setCookieValue = response.headers.get(SF_SET_COOKIE_HEADER) || response.headers.get(SET_COOKIE_HEADER);
+                if (setCookieValue != null && window.ddSbh) {
                   try {
-                    l.setDDSession(y);
-                  } catch (n) {}
+                    tools.setDDSession(setCookieValue);
+                  } catch (err) {}
                 }
-                if (y && l.hasPartitionedAttribute(y)) {
-                  var p = l.getCookieDomainFromCookie(y);
-                  if (p) {
-                    l.removeUnpartitionedCookieIfPartitionedOneIsPresent(p);
+                if (setCookieValue && tools.hasPartitionedAttribute(setCookieValue)) {
+                  var cookieDomain = tools.getCookieDomainFromCookie(setCookieValue);
+                  if (cookieDomain) {
+                    tools.removeUnpartitionedCookieIfPartitionedOneIsPresent(cookieDomain);
                   }
                 }
               } else {
-                l.removeUnpartitionedCookieIfPartitionedOneIsPresent();
+                tools.removeUnpartitionedCookieIfPartitionedOneIsPresent();
               }
-              if (v.ok) {
-                t(v);
+              if (response.ok) {
+                resolve(response);
               } else {
-                v.clone().text().then(function (u) {
-                  var h = v.headers;
-                  var y = l.getDataDomeChallengeType(h);
-                  var p = b.filterAsyncResponse(v.url, r, i, d);
-                  if (y || p) {
-                    var m = new c(e).process(u, o, w, null, d, v.url, y);
-                    var F = window.dataDomeOptions.replayAfterChallenge;
-                    if (m && !s && F) {
-                      function L() {
-                        s = false;
-                        window.removeEventListener(l.internalEventNames.replayRequest, U);
+                // non-ok response: check for challenge
+                response.clone().text().then(function (bodyText) {
+                  var headers = response.headers;
+                  var challengeType = tools.getDataDomeChallengeType(headers);
+                  var matchesFilter = self.filterAsyncResponse(response.url, inclusionPatterns, exclusionPatterns, isSalesforce);
+                  if (challengeType || matchesFilter) {
+                    var challengeDetected = new DataDomeResponse(wrapper).process(bodyText, shouldAbort, shouldDisplay, null, isSalesforce, response.url, challengeType);
+                    var replayEnabled = window.dataDomeOptions.replayAfterChallenge;
+                    if (challengeDetected && !fetchReplayInProgress && replayEnabled) {
+                      function cleanupReplay() {
+                        fetchReplayInProgress = false;
+                        window.removeEventListener(tools.internalEventNames.replayRequest, onReplay);
                       }
-                      function U() {
-                        if (a[0] instanceof Request && n) {
-                          a[0] = n;
+                      function onReplay() {
+                        if (fetchArgs[0] instanceof Request && clonedRequest) {
+                          fetchArgs[0] = clonedRequest;
                         }
-                        window.fetch.apply(window, a).then(function (n) {
-                          L();
-                          t(n);
-                        }).catch(function (n) {
-                          L();
-                          f();
+                        window.fetch.apply(window, fetchArgs).then(function (replayResponse) {
+                          cleanupReplay();
+                          resolve(replayResponse);
+                        }).catch(function (replayError) {
+                          cleanupReplay();
+                          reject();
                         });
                       }
-                      s = true;
-                      window.addEventListener(l.internalEventNames.replayRequest, U);
+                      fetchReplayInProgress = true;
+                      window.addEventListener(tools.internalEventNames.replayRequest, onReplay);
                     } else {
-                      t(v);
+                      resolve(response);
                     }
                   } else {
-                    t(v);
+                    resolve(response);
                   }
-                }).catch(function (n) {
-                  f();
+                }).catch(function (err) {
+                  reject();
                 });
               }
-            }).catch(function (n) {
-              f(n);
+            }).catch(function (err) {
+              reject(err);
             });
           });
         }
       };
     }
   };
-  this.filterAsyncResponse = function (e, t, r, i) {
-    if (e == null) {
+
+  // check if a URL should be intercepted (matches inclusion/exclusion config)
+  this.filterAsyncResponse = function (url, inclusionPatterns, exclusionPatterns, isSalesforce) {
+    if (url == null) {
       return true;
     }
-    if (e === window.dataDomeOptions.endpoint) {
+    if (url === window.dataDomeOptions.endpoint) {
       return false;
     }
-    if (i) {
-      var c = "DDUser-Challenge";
-      var o = e.replace(/\?.*/, "");
-      return o.slice(o.length - c.length) === c;
+    if (isSalesforce) {
+      var suffix = "DDUser-Challenge";
+      var urlWithoutQuery = url.replace(/\?.*/, "");
+      return urlWithoutQuery.slice(urlWithoutQuery.length - suffix.length) === suffix;
     }
-    return !!t && t.length === 0 || require("../common/DataDomeUrlTools.js").matchURLConfig(e, t, r);
+    return !!inclusionPatterns && inclusionPatterns.length === 0 || require("../common/DataDomeUrlTools.js").matchURLConfig(url, inclusionPatterns, exclusionPatterns);
   };
 };
