@@ -1,11 +1,12 @@
-var r = 31536000000;
+var ONE_YEAR_MS = 31536000000; // 365 days in milliseconds
+
 module.exports = function () {
-  this.dataDomeCookieName = "datadome";
-  this.IECustomEvent = null;
-  this.emptyCookieDefaultValue = ".keep";
-  this.dataDomeStatusHeader = "x-dd-b";
-  this.dataDomeSfccStatusHeader = "x-sf-cc-x-dd-b";
-  this.eventNames = {
+  this.dataDomeCookieName = "datadome"; // name of the main tracking cookie
+  this.IECustomEvent = null; // cached IE CustomEvent constructor (lazy-initialized in dispatchEvent)
+  this.emptyCookieDefaultValue = ".keep"; // default session value when no cookie exists (first visit)
+  this.dataDomeStatusHeader = "x-dd-b"; // header carrying the challenge type bitmask
+  this.dataDomeSfccStatusHeader = "x-sf-cc-x-dd-b"; // same header but for Salesforce Commerce Cloud
+  this.eventNames = { // custom events dispatched on window (listened to if enableTagEvents=true)
     ready: "dd_ready",
     posting: "dd_post",
     posted: "dd_post_done",
@@ -18,339 +19,445 @@ module.exports = function () {
     captchaError: "dd_captcha_error",
     captchaPassed: "dd_captcha_passed"
   };
-  this.internalEventNames = {
+  this.internalEventNames = { // internal events, not exposed to the website
     replayRequest: "dd_replay_request"
   };
-  this.ChallengeType = {
+  this.ChallengeType = { // possible challenge types returned by getDataDomeChallengeType
     BLOCK: "block",
     HARD_BLOCK: "hard_block",
     DEVICE_CHECK: "device_check",
     DEVICE_CHECK_INVISIBLE_MODE: "device_check_invisible_mode"
   };
-  this.responseFormats = {
+  this.responseFormats = { // used by getResponseTypeAndContent to tag the response
     html: "HTML",
     json: "JSON"
   };
-  this.getCookie = function (n, e) {
-    if (n == null) {
-      n = this.dataDomeCookieName;
+
+  this.getCookie = function (cookieName, cookieString) {
+    // if there is no cookie name, we use "datadome" by default
+    if (cookieName == null) {
+      cookieName = this.dataDomeCookieName;
     }
-    if (e == null) {
-      e = document.cookie;
+
+    // if there is no value, we use cookies of the navigator
+    if (cookieString == null) {
+      cookieString = document.cookie;
     }
-    var t = new RegExp(n + "=([^;]+)").exec(e);
-    if (t != null) {
-      return unescape(t[1]);
+
+    // regex to find "nameOfTheCookie=value"
+    var match = new RegExp(cookieName + "=([^;]+)").exec(cookieString);
+
+    // if we found, we decode encoded characters (%20 becomes a space)
+    if (match != null) {
+      return unescape(match[1]);
     } else {
+      // cookie not found
       return null;
     }
   };
-  this.findCookiesByName = function (n, e) {
-    for (var t, r = e || document.cookie, i = new RegExp("(?:^|;\\s*)(" + n + ")=([^;]+)", "gi"), c = []; t = i.exec(r);) {
-      c.push({
-        name: t[1],
-        value: t[2]
+
+
+  // find all cookies matching a name (returns an array, unlike getCookie which returns only the first one)
+  this.findCookiesByName = function (cookieName, cookieString) {
+    var source = cookieString || document.cookie;
+    var regex = new RegExp("(?:^|;\\s*)(" + cookieName + ")=([^;]+)", "gi");
+    var results = [];
+    var match;
+
+    while (match = regex.exec(source)) {
+      results.push({
+        name: match[1],
+        value: match[2]
       });
     }
-    return c;
+
+    return results;
   };
+
   this.findDataDomeCookies = function (n) {
     return this.findCookiesByName(this.dataDomeCookieName, n);
   };
+
   this.setCookie = function (n) {
     try {
       document.cookie = n;
-    } catch (n) {}
+    } catch (n) { }
   };
-  this.replaceCookieDomain = function (n, e) {
+
+  // replace the domain in a cookie string
+  //"datadome=abc; Domain=.old.com; path=/"
+  //                     ↓
+  //"datadome=abc; Domain=.new.com; path=/"
+  this.replaceCookieDomain = function (cookieString, newDomain) {
     try {
-      n = n.replace(/Domain=.*?;/, "Domain=" + e + ";");
-    } catch (n) {}
-    return n;
+      cookieString = cookieString.replace(/Domain=.*?;/, "Domain=" + newDomain + ";");
+    } catch (n) { }
+    return cookieString;
   };
-  this.getCookieDomainFromCookie = function (n) {
-    var e = "Domain=";
-    var t = n.indexOf(e);
-    if (t === -1) {
+
+  // extract the domain from a cookie string: "...Domain=.example.com;..." => ".example.com"
+  this.getCookieDomainFromCookie = function (cookieString) {
+    var prefix = "Domain=";
+    var start = cookieString.indexOf(prefix);
+    if (start === -1) {
       return "";
     }
-    var r = t + e.length;
-    var i = n.indexOf(";", r);
-    if (i === -1) {
-      i = n.length;
+
+    var valueStart = start + prefix.length;
+    var end = cookieString.indexOf(";", valueStart);
+    if (end === -1) {
+      end = cookieString.length;
     }
-    return n.substring(r, i).trim();
+
+    return cookieString.substring(valueStart, end).trim();
   };
-  this.hasPartitionedAttribute = function (n) {
-    return !!n && typeof n == "string" && /;\s*Partitioned\s*(;|$)/i.test(n);
+
+  // check if a cookie string has the "Partitioned" attribute (CHIPS - Chrome's third-party cookie partitioning)
+  this.hasPartitionedAttribute = function (cookieString) {
+    return !!cookieString && typeof cookieString == "string" && /;\s*Partitioned\s*(;|$)/i.test(cookieString);
   };
-  this.setCookieWithFallback = function (n) {
-    var e = "ddCookieCandidateDomain";
-    var t = this.getCookie(this.dataDomeCookieName, n);
-    if (t === null) {
-      return n;
+
+
+  // try to set the datadome cookie, testing different domain suffixes until one works
+  // caches the working domain in sessionStorage for next time
+  // why ? because on shop.fr.example.com the cookie can works on .example.com, .fr.example.com or shop.fr.example.com, it depends of the navigator and the website config
+  this.setCookieWithFallback = function (cookieString) {
+    var storageKey = "ddCookieCandidateDomain";
+    var expectedValue = this.getCookie(this.dataDomeCookieName, cookieString);
+    if (expectedValue === null) {
+      return cookieString;
     }
-    var r = function (e) {
-      var t = this.replaceCookieDomain(n, e);
-      document.cookie = t;
+
+    // try setting cookie on a given domain, return the result
+    var tryDomain = function (domain) {
+      var candidate = this.replaceCookieDomain(cookieString, domain);
+      document.cookie = candidate;
       return {
-        candidateCookie: t,
+        candidateCookie: candidate,
         actualValue: this.getCookie(this.dataDomeCookieName)
       };
     }.bind(this);
+
+    // 1. try the cached domain from sessionStorage first
     if (this.isSessionStorageEnabled()) {
-      var i = window.sessionStorage.getItem(e);
-      if (i) {
-        if ((a = r(i)).actualValue === t) {
-          return a.candidateCookie;
+      var cachedDomain = window.sessionStorage.getItem(storageKey);
+      if (cachedDomain) {
+        var result = tryDomain(cachedDomain);
+        if (result.actualValue === expectedValue) {
+          return result.candidateCookie;
         }
       }
     }
-    for (var c = function (n) {
-        for (var e = n.split("."), t = [], r = 2; r <= e.length; r++) {
-          t.push("." + e.slice(-r).join("."));
-        }
-        if (t.length === 0) {
-          t.push(n);
-        }
-        return t;
-      }(window.location.hostname), o = 0; o < c.length; o++) {
-      var a;
-      var s = c[o];
-      if ((a = r(s)).actualValue === t) {
+
+    // 2. build candidate domains: "a.b.example.com" => [".example.com", ".b.example.com", ".a.b.example.com"]
+    var parts = window.location.hostname.split(".");
+    var candidates = [];
+    for (var i = 2; i <= parts.length; i++) {
+      candidates.push("." + parts.slice(-i).join("."));
+    }
+    if (candidates.length === 0) {
+      candidates.push(window.location.hostname);
+    }
+
+    // 3. try each candidate domain
+    for (var j = 0; j < candidates.length; j++) {
+      var domain = candidates[j];
+      var result = tryDomain(domain);
+      if (result.actualValue === expectedValue) {
+        // cache the working domain
         if (this.isSessionStorageEnabled()) {
           try {
-            window.sessionStorage.setItem(e, s);
-          } catch (n) {}
+            window.sessionStorage.setItem(storageKey, domain);
+          } catch (e) { }
         }
-        return a.candidateCookie;
+        return result.candidateCookie;
       }
     }
-    return n;
+
+    return cookieString;
   };
+
+  // get the current datadome session ID
+  // - if sessionByHeader mode => read from localStorage
+  // - otherwise => read from the datadome cookie
+  // - if nothing found => return ".keep" (first visit)
   this.getDDSession = function () {
     if (window.ddSbh && this.isLocalStorageEnabled()) {
-      var n = window.localStorage.getItem(window.dataDomeOptions.ddCookieSessionName);
-      if (n) {
-        return n;
+      var stored = window.localStorage.getItem(window.dataDomeOptions.ddCookieSessionName);
+      if (stored) {
+        return stored;
       }
     }
-    var e = this.getCookie(this.dataDomeCookieName, document.cookie);
-    return e || this.emptyCookieDefaultValue;
+    var cookie = this.getCookie(this.dataDomeCookieName, document.cookie);
+    return cookie || this.emptyCookieDefaultValue;
   };
-  this.setDDSession = function (n) {
+
+  // its the "reverse" of the getDDSession, it saves the session
+  // saves the datadome session
+  // - stores in localStorage if sessionByHeader mode
+  // - writes the cookie with 1-year expiry on the root domain
+  this.setDDSession = function (setCookieHeader) {
     try {
-      var e = this.getCookie(this.dataDomeCookieName, n);
-      var t = this.getRootDomain(window.location.origin ? window.location.origin : window.location.href);
+      var cookieValue = this.getCookie(this.dataDomeCookieName, setCookieHeader);
+      var rootDomain = this.getRootDomain(window.location.origin ? window.location.origin : window.location.href);
+
       if (window.ddSbh && this.isLocalStorageEnabled()) {
-        window.localStorage.setItem(window.dataDomeOptions.ddCookieSessionName, e);
+        window.localStorage.setItem(window.dataDomeOptions.ddCookieSessionName, cookieValue);
       }
-      var i = "; expires=" + new Date(Date.now() + r).toGMTString();
-      this.setCookieWithFallback("datadome=" + e + i + "; path=/" + (t ? "; domain=" + t : ""));
-    } catch (n) {}
+
+      var expires = "; expires=" + new Date(Date.now() + ONE_YEAR_MS).toGMTString();
+
+      this.setCookieWithFallback("datadome=" + cookieValue + expires + "; path=/" + (rootDomain ? "; domain=" + rootDomain : ""));
+
+    } catch (e) { }
   };
-  this.getRootDomain = function (n) {
-    if (typeof n != "string") {
+
+  // extract root domain from a URL: "https://shop.example.com:8080/path" => ".example.com"
+  this.getRootDomain = function (url) {
+    if (typeof url != "string") {
       return "";
     }
-    var e = "://";
-    var t = n.indexOf(e);
-    if (t === -1) {
+    var protocolSep = "://";
+    var protocolEnd = url.indexOf(protocolSep);
+    if (protocolEnd === -1) {
       return "";
     }
-    var r = n.substring(t + e.length);
-    var i = r.indexOf("/");
-    var c = i !== -1 ? r.substring(0, i) : r;
-    var o = c.indexOf(":");
-    if (o > -1) {
-      c = c.slice(0, o);
+    var afterProtocol = url.substring(protocolEnd + protocolSep.length);
+    var slashIndex = afterProtocol.indexOf("/");
+    var host = slashIndex !== -1 ? afterProtocol.substring(0, slashIndex) : afterProtocol;
+    var colonIndex = host.indexOf(":");
+    if (colonIndex > -1) {
+      host = host.slice(0, colonIndex);
     }
-    var a = c.split(".");
-    if (a.length >= 2) {
-      return "." + a.slice(-2).join(".");
+    var parts = host.split(".");
+    if (parts.length >= 2) {
+      return "." + parts.slice(-2).join(".");
     } else {
-      return c;
+      return host;
     }
   };
-  this.debug = function (n, e) {
+
+
+  // dead code, checks for console but never actually logs anything
+  this.debug = function (msg, level) {
     if (typeof console != "undefined" && console.log !== undefined) {
-      window.dataDomeOptions.debug;
+      window.dataDomeOptions.debug; // reads the value but does nothing with it
     }
   };
-  this.removeSubstringPattern = function (n, e) {
-    if (e) {
-      return n.replace(new RegExp(e), function (n, e) {
-        return n.replace(e, "");
+
+
+  // remove a captured group from a string using a regex pattern
+  // used to clean sensitive data from referrer URLs (e.g. remove tokens/IDs)
+  this.removeSubstringPattern = function (str, pattern) {
+    if (pattern) {
+      return str.replace(new RegExp(pattern), function (fullMatch, capturedGroup) {
+        return fullMatch.replace(capturedGroup, "");
       });
     } else {
-      return n;
+      return str;
     }
   };
-  this.addEventListener = function (n, e, t, r) {
-    if (n.addEventListener) {
-      n.addEventListener(e, t, r);
-    } else if (n.attachEvent !== undefined) {
-      n.attachEvent("on" + e, t);
+
+
+  this.addEventListener = function (element, eventName, handler, useCapture) {
+    if (element.addEventListener) {
+      element.addEventListener(eventName, handler, useCapture);
+    } else if (element.attachEvent !== undefined) { // IE8
+      element.attachEvent("on" + eventName, handler);
     } else {
-      n["on" + e] = t;
+      element["on" + eventName] = handler;
     }
   };
-  this.removeEventListener = function (n, e, t, r) {
-    if (n.removeEventListener) {
-      n.removeEventListener(e, t, r);
-    } else if (n.detachEvent) {
-      n.detachEvent("on" + e, t);
+
+  this.removeEventListener = function (element, eventName, handler, useCapture) {
+    if (element.removeEventListener) {
+      element.removeEventListener(eventName, handler, useCapture);
+    } else if (element.detachEvent) { // IE8
+      element.detachEvent("on" + eventName, handler);
     }
   };
+
+
   this.noscroll = function () {
     window.scrollTo(0, 0);
   };
-  this.isSafariUA = function () {
+
+
+  this.isSafariUA = function () { // excluse chrome and android (that also contains "safari" in their user agent) to just get the Safari navigator
     return !!window.navigator && /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
   };
-  this.dispatchEvent = function (n, e) {
-    var t;
-    (e = e || {}).context = "tags";
+
+  // dispatch a custom event on window with detail data
+  this.dispatchEvent = function (eventName, detail) {
+    var event;
+    (detail = detail || {}).context = "tags";
     if (typeof window.CustomEvent == "function") {
-      t = new CustomEvent(n, {
-        detail: e
-      });
+      event = new CustomEvent(eventName, { detail: detail });
     } else {
-      this.IECustomEvent ||= function (n, e) {
-        var t = document.createEvent("CustomEvent");
-        t.initCustomEvent(n, false, false, e);
-        return t;
+      // IE fallback
+      this.IECustomEvent ||= function (name, detail) {
+        var event = document.createEvent("CustomEvent");
+        event.initCustomEvent(name, false, false, detail);
+        return event;
       };
-      t = new this.IECustomEvent(n, e);
+      event = new this.IECustomEvent(eventName, detail);
     }
-    if (t) {
-      window.dispatchEvent(t);
+    if (event) {
+      window.dispatchEvent(event);
     }
   };
+
   this.isLocalStorageEnabled = function () {
     if (this.localStorageEnabled == null) {
       this.localStorageEnabled = function () {
         try {
           return !!window.localStorage;
-        } catch (n) {
+        } catch (e) { // private browsing mode
           return false;
         }
       }();
     }
     return this.localStorageEnabled;
   };
+
   this.isSessionStorageEnabled = function () {
     if (this.sessionStorageEnabled == null) {
       this.sessionStorageEnabled = function () {
         try {
           return !!window.sessionStorage;
-        } catch (n) {
+        } catch (e) { // private browsing mode
           return false;
         }
       }();
     }
     return this.sessionStorageEnabled;
   };
-  this.removeCookie = function (n, e) {
-    var t = [];
-    t.push(n + "=0");
-    if (e && e.domain) {
-      t.push("Domain=" + e.domain);
+
+  // remove a cookie by setting its expiry to the past
+  this.removeCookie = function (cookieName, options) {
+    var parts = [];
+    parts.push(cookieName + "=0");
+
+    if (options && options.domain) {
+      parts.push("Domain=" + options.domain);
     }
-    if (e && e.path) {
-      t.push("Path=" + e.path);
+    if (options && options.path) {
+      parts.push("Path=" + options.path);
     }
-    if (e && e.partitioned) {
-      t.push("Partitioned");
+    if (options && options.partitioned) {
+      parts.push("Partitioned");
     }
-    t.push("Expires=Thu, 01 Jan 1970 00:00:00 GMT");
-    document.cookie = t.join(";");
-    return this.getCookie(n) === null;
+    parts.push("Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+
+    document.cookie = parts.join(";");
+
+    return this.getCookie(cookieName) === null;
   };
+
+  // delete all "datadome" cookies on the current host and root domain
   this.deleteAllDDCookies = function () {
-    for (var n = document.cookie.split("; "), e = document.location.host, t = e.split("."), r = [e, t.slice(t.length - 2).join(".")], i = 0; i < n.length; i++) {
-      var c = n[i];
-      var o = c.indexOf("=");
-      var a = o > -1 ? c.substr(0, o) : c;
-      if (a === "datadome") {
-        for (var s = 0; s < r.length; s++) {
-          document.cookie = a + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; domain=" + r[s] + "; path=/";
+    var cookies = document.cookie.split("; ");
+    var host = document.location.host;
+    var hostParts = host.split(".");
+    var domains = [host, hostParts.slice(hostParts.length - 2).join(".")];
+
+    for (var i = 0; i < cookies.length; i++) {
+      var cookie = cookies[i];
+      var eqIndex = cookie.indexOf("=");
+      var name = eqIndex > -1 ? cookie.substr(0, eqIndex) : cookie;
+      if (name === "datadome") {
+        for (var j = 0; j < domains.length; j++) {
+          document.cookie = name + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; domain=" + domains[j] + "; path=/";
         }
       }
     }
   };
-  this.getResponseTypeAndContent = function (n) {
+
+
+  // parse a response body: if valid JSON => {type:"JSON", data:{...}}, otherwise => {type:"HTML", data:"..."}
+  this.getResponseTypeAndContent = function (responseBody) {
     try {
-      var e = JSON.parse(n);
-      return {
-        type: this.responseFormats.json,
-        data: e
-      };
+      var parsed = JSON.parse(responseBody);
+      return { type: this.responseFormats.json, data: parsed };
     } catch (e) {
-      return {
-        type: this.responseFormats.html,
-        data: n
-      };
+      return { type: this.responseFormats.html, data: responseBody };
     }
   };
-  this.hasHeader = function (n, e) {
-    if (typeof n == "string") {
-      var t = e + ": ";
-      return n.indexOf("\n" + t) > 0 || n.indexOf(t) === 0;
+
+
+
+  // check if a header exists in either a raw header string or a Headers object
+  this.hasHeader = function (headers, headerName) {
+    if (typeof headers == "string") {
+      var prefix = headerName + ": ";
+      return headers.indexOf("\n" + prefix) > 0 || headers.indexOf(prefix) === 0;
     }
-    return typeof n == "object" && n.constructor.name === "Headers" && n.has(e);
+    return typeof headers == "object" && headers.constructor.name === "Headers" && headers.has(headerName);
   };
-  this.checkDataDomeStatusHeader = function (n) {
-    return this.hasHeader(n, this.dataDomeStatusHeader) || this.hasHeader(n, this.dataDomeSfccStatusHeader);
+
+
+  // check if the response contains the datadome status header (x-dd-b or x-sf-cc-x-dd-b)
+  this.checkDataDomeStatusHeader = function (headers) {
+    return this.hasHeader(headers, this.dataDomeStatusHeader) || this.hasHeader(headers, this.dataDomeSfccStatusHeader);
   };
-  this.findXHRHeaderValue = function (n, e) {
-    for (var t = n.trim().split(/[\r\n]+/), r = 0; r < t.length; r++) {
-      var i = t[r].split(": ");
-      if (i[0].toLowerCase() === e.toLowerCase()) {
-        return i[1] || null;
+
+  // find a header value in a raw XHR getAllResponseHeaders() string
+  this.findXHRHeaderValue = function (rawHeaders, headerName) {
+    var lines = rawHeaders.trim().split(/[\r\n]+/);
+    for (var i = 0; i < lines.length; i++) {
+      var parts = lines[i].split(": ");
+      if (parts[0].toLowerCase() === headerName.toLowerCase()) {
+        return parts[1] || null;
       }
     }
     return null;
   };
-  this.decodeHTMLEntity = function (n) {
-    var e = new DOMParser().parseFromString(n, "text/html");
-    if (e) {
-      return e.documentElement.textContent;
+
+  // decode HTML entities: "&amp;" => "&", "&#39;" => "'"
+  this.decodeHTMLEntity = function (html) {
+    var doc = new DOMParser().parseFromString(html, "text/html");
+    if (doc) {
+      return doc.documentElement.textContent;
     } else {
       return "";
     }
   };
-  this.getDataDomeChallengeType = function (n) {
-    var e = null;
-    if (typeof n == "string") {
-      e = this.findXHRHeaderValue(n, this.dataDomeStatusHeader) || this.findXHRHeaderValue(n, this.dataDomeSfccStatusHeader);
-    } else if (typeof n == "object" && n.constructor.name === "Headers") {
-      e = n.get(this.dataDomeStatusHeader) || n.get(this.dataDomeSfccStatusHeader);
+
+  // extract the challenge type from the x-dd-b header value (bitmask)
+  // bits 0-7: challenge type (1=block, 2=hard_block, 3=device_check)
+  // bit 8: if set + type 3 => invisible mode device check
+  this.getDataDomeChallengeType = function (headers) {
+    var headerValue = null;
+    if (typeof headers == "string") {
+      headerValue = this.findXHRHeaderValue(headers, this.dataDomeStatusHeader) || this.findXHRHeaderValue(headers, this.dataDomeSfccStatusHeader);
+    } else if (typeof headers == "object" && headers.constructor.name === "Headers") {
+      headerValue = headers.get(this.dataDomeStatusHeader) || headers.get(this.dataDomeSfccStatusHeader);
     }
-    if (!e) {
+    if (!headerValue) {
       return null;
     }
-    switch (e & 255) {
-      case 1:
-        return this.ChallengeType.BLOCK;
-      case 2:
-        return this.ChallengeType.HARD_BLOCK;
+    switch (headerValue & 255) {       // low 8 bits = challenge type
+      case 1: return this.ChallengeType.BLOCK;
+      case 2: return this.ChallengeType.HARD_BLOCK;
       case 3:
-        if (Boolean(e >> 8 & 1)) {
+        if (Boolean(headerValue >> 8 & 1)) {  // bit 8 = invisible flag
           return this.ChallengeType.DEVICE_CHECK_INVISIBLE_MODE;
         } else {
           return this.ChallengeType.DEVICE_CHECK;
         }
-      default:
-        return this.ChallengeType.UNKNOWN;
+      default: return this.ChallengeType.UNKNOWN;
     }
   };
-  this.removeUnpartitionedCookieIfPartitionedOneIsPresent = function (n) {
+
+
+  // CHIPS cleanup: if there are 2+ datadome cookies (partitioned + unpartitioned),
+  // remove the unpartitioned one to avoid conflicts
+  this.removeUnpartitionedCookieIfPartitionedOneIsPresent = function (domain) {
     if (!window.dataDomeUnpartitionedCookieCleanupExecuted) {
-      var e = this.findDataDomeCookies();
-      if (!(e.length < 2)) {
-        this.removeCookie(e[0].name, {
-          domain: n || window.location.hostname,
+      var ddCookies = this.findDataDomeCookies();
+      if (!(ddCookies.length < 2)) {
+        this.removeCookie(ddCookies[0].name, {
+          domain: domain || window.location.hostname,
           path: "/",
           partitioned: false
         });
@@ -358,4 +465,5 @@ module.exports = function () {
       }
     }
   };
+
 };
