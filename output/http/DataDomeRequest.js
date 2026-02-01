@@ -22,7 +22,7 @@ module.exports = function (jsType) {
           });
         }
 
-      // response mode: use XHR to read back the cookie
+        // response mode: use XHR to read back the cookie
       } else if (window.XMLHttpRequest) {
         var xhr = new XMLHttpRequest();
         try {
@@ -90,7 +90,7 @@ module.exports = function (jsType) {
                     endpointUrl: window.dataDomeOptions.endpoint
                   });
                 }
-              } catch (e) {}
+              } catch (e) { }
             }
           };
           tools.debug("Request sent.", xhr);
