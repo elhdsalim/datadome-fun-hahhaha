@@ -1,274 +1,291 @@
-var r = require("../common/DataDomeTools.js");
-var i = require("../common/DataDomeUrlTools.js");
-var c = ["F45F521D9622089B5E33C18031FB8E", "10D43DA6B79A5089E1A7846864D6BD", "34C213C44735CBC8D9C08B65110F96", "87B024B36133DBAA93E054371373E7"];
-module.exports = function (n) {
-  var e = new r();
-  this.parseResponseBody = function (t, r, i, c) {
+var DataDomeTools = require("../common/DataDomeTools.js");
+var DataDomeUrlTools = require("../common/DataDomeUrlTools.js");
+// js keys that are allowed to have allow-popups in the challenge iframe sandbox
+var POPUPS_ALLOWED_KEYS = ["F45F521D9622089B5E33C18031FB8E", "10D43DA6B79A5089E1A7846864D6BD", "34C213C44735CBC8D9C08B65110F96", "87B024B36133DBAA93E054371373E7"];
+module.exports = function (wrapper) {
+  var tools = new DataDomeTools();
+
+  // parse the response body to extract challenge URL
+  // 3 formats: dd={...} inline JS, {"url":"..."} HTML-encoded JSON, or raw JSON
+  this.parseResponseBody = function (isXhr, body, challengeUrl, challengeType) {
     try {
-      var o;
-      var a;
-      var s;
-      var f;
-      var u;
-      var h;
-      var l;
-      var w;
-      var d = typeof r == "string";
-      if (d) {
-        h = r.indexOf("dd={");
-        l = r.indexOf("'cid':");
-        w = r.slice(h).indexOf("}");
-        a = r.indexOf("<style") > -1 || r.indexOf("<script") > -1;
-        s = r.indexOf("{\"url\":\"") > -1;
-        u = (f = h > -1 && l > h && l < h + w) || s;
+      var result;
+      var hasHtmlTags;
+      var hasJsonUrl;
+      var hasDdBlock;
+      var isChallenge;
+      var ddBlockStart;
+      var cidIndex;
+      var ddBlockLength;
+      var isString = typeof body == "string";
+      if (isString) {
+        ddBlockStart = body.indexOf("dd={");
+        cidIndex = body.indexOf("'cid':");
+        ddBlockLength = body.slice(ddBlockStart).indexOf("}");
+        hasHtmlTags = body.indexOf("<style") > -1 || body.indexOf("<script") > -1;
+        hasJsonUrl = body.indexOf("{\"url\":\"") > -1;
+        isChallenge = (hasDdBlock = ddBlockStart > -1 && cidIndex > ddBlockStart && cidIndex < ddBlockStart + ddBlockLength) || hasJsonUrl;
       }
-      if (d && u && a) {
-        if (f) {
-          var v;
-          var b = h + "dd=".length;
-          var y = b + r.slice(b).indexOf("}") + 1;
-          var p = e.decodeHTMLEntity(r.slice(b, y));
-          var m = JSON.parse(p.replace(/'/g, "\""));
-          var F = m.s ? "&s=" + m.s : "";
-          var L = m.t ? "&t=" + m.t : "";
-          var U = m.e ? "&e=" + m.e : "";
-          if (m.rt == "c") {
-            v = "/captcha/";
-          } else if (m.rt == "i") {
-            v = "/interstitial/";
-            U += m.b ? "&b=" + m.b : "";
+      if (isString && isChallenge && hasHtmlTags) {
+        // format 1: dd={...} inline block in HTML response
+        if (hasDdBlock) {
+          var routePath;
+          var jsonStart = ddBlockStart + "dd=".length;
+          var jsonEnd = jsonStart + body.slice(jsonStart).indexOf("}") + 1;
+          var decoded = tools.decodeHTMLEntity(body.slice(jsonStart, jsonEnd));
+          var ddParams = JSON.parse(decoded.replace(/'/g, "\""));
+          var sParam = ddParams.s ? "&s=" + ddParams.s : "";
+          var tParam = ddParams.t ? "&t=" + ddParams.t : "";
+          var eParam = ddParams.e ? "&e=" + ddParams.e : "";
+          if (ddParams.rt == "c") {
+            routePath = "/captcha/";
+          } else if (ddParams.rt == "i") {
+            routePath = "/interstitial/";
+            eParam += ddParams.b ? "&b=" + ddParams.b : "";
           }
-          o = {
-            url: "https://" + m.host + v + "?initialCid=" + m.cid + "&hash=" + m.hsh + L + F + "&referer=" + encodeURIComponent(document.location.href) + U + "&cid=" + (m.cookie || e.getCookie())
+          result = {
+            url: "https://" + ddParams.host + routePath + "?initialCid=" + ddParams.cid + "&hash=" + ddParams.hsh + tParam + sParam + "&referer=" + encodeURIComponent(document.location.href) + eParam + "&cid=" + (ddParams.cookie || tools.getCookie())
           };
-        } else if (s) {
-          var A = r.indexOf("{\"url\":\"");
-          var Q = A + r.slice(A).indexOf("}") + 1;
-          var Y = r.slice(A, Q);
-          var D = e.decodeHTMLEntity(Y);
-          var R = decodeURIComponent(D);
-          o = JSON.parse(R);
+        // format 2: {"url":"..."} HTML-encoded JSON in HTML response
+        } else if (hasJsonUrl) {
+          var jsonUrlStart = body.indexOf("{\"url\":\"");
+          var jsonUrlEnd = jsonUrlStart + body.slice(jsonUrlStart).indexOf("}") + 1;
+          var jsonRaw = body.slice(jsonUrlStart, jsonUrlEnd);
+          var jsonDecoded = tools.decodeHTMLEntity(jsonRaw);
+          var jsonString = decodeURIComponent(jsonDecoded);
+          result = JSON.parse(jsonString);
         }
-        if (f) {
-          n.i("chtp", i);
+        if (hasDdBlock) {
+          wrapper.i("chtp", challengeUrl);
         }
-      } else if (c || t && d && u) {
-        o = d ? JSON.parse(r) : r;
+      // format 3: raw JSON (from XHR or pre-parsed)
+      } else if (challengeType || isXhr && isString && isChallenge) {
+        result = isString ? JSON.parse(body) : body;
       }
-    } catch (e) {
-      if (e && e.message) {
+    } catch (err) {
+      if (err && err.message) {
         try {
-          n.i("cdcx", e.message.slice(0, 150));
-        } catch (n) {}
+          wrapper.i("cdcx", err.message.slice(0, 150));
+        } catch (e) {}
       }
       return;
     }
-    return o;
+    return result;
   };
-  this.process = function (n, t, r, c, o, a, s) {
+
+  // process a response: parse it, verify trusted origin, display challenge if needed, abort XHR if needed
+  this.process = function (body, shouldAbort, shouldDisplay, xhrObj, isXhr, challengeUrl, challengeType) {
     if (window.DataDomeResponseDisplayed) {
       return false;
     }
-    if (!n) {
+    if (!body) {
       return false;
     }
-    var f = this.parseResponseBody(o, n, a, s);
-    var u = null;
-    if (o && f) {
-      u = e.decodeHTMLEntity(f.url);
-    } else if (f) {
-      u = f.url;
+    var parsed = this.parseResponseBody(isXhr, body, challengeUrl, challengeType);
+    var responseUrl = null;
+    if (isXhr && parsed) {
+      responseUrl = tools.decodeHTMLEntity(parsed.url);
+    } else if (parsed) {
+      responseUrl = parsed.url;
     }
-    return !!u && !!i.isTrustedOrigin(u) && (window.dataDomeOptions.enableTagEvents && e.dispatchEvent(e.eventNames.blocked, {
-      url: a,
-      captchaUrl: u,
-      responseUrl: u
-    }), r && this.displayResponsePage({
-      responsePageUrl: u,
-      challengeType: s
-    }), t && c && c.abort(), true);
+    return !!responseUrl && !!DataDomeUrlTools.isTrustedOrigin(responseUrl) && (window.dataDomeOptions.enableTagEvents && tools.dispatchEvent(tools.eventNames.blocked, {
+      url: challengeUrl,
+      captchaUrl: responseUrl,
+      responseUrl: responseUrl
+    }), shouldDisplay && this.displayResponsePage({
+      responsePageUrl: responseUrl,
+      challengeType: challengeType
+    }), shouldAbort && xhrObj && xhrObj.abort(), true);
   };
-  this.displayResponsePage = function (n) {
-    var t;
-    var r = n.responsePageUrl;
-    var o = n.challengeType;
-    var a = n.root;
-    var s = window.dataDomeOptions.enableTagEvents;
-    var f = window.dataDomeOptions.isSalesforce;
-    var u = e.isSafariUA() ? "height: -webkit-fill-available;" : "";
-    var h = {
+
+  // display the challenge iframe (captcha, interstitial, or invisible device check)
+  this.displayResponsePage = function (config) {
+    var viewportMeta;
+    var pageUrl = config.responsePageUrl;
+    var challengeType = config.challengeType;
+    var rootElement = config.root;
+    var enableTagEvents = window.dataDomeOptions.enableTagEvents;
+    var isSalesforce = window.dataDomeOptions.isSalesforce;
+    var safariHeightFix = tools.isSafariUA() ? "height: -webkit-fill-available;" : "";
+    var styles = {
       dcInvisible: "visibility: hidden; position: absolute; top: -9999px; left: -9999px;",
       root: "width:100%;height:100%;background-color:#ffffff;",
-      default: "height:100vh;" + u + "width:100%;position:fixed;top:0;left:0;z-index:2147483647;background-color:#ffffff;"
+      default: "height:100vh;" + safariHeightFix + "width:100%;position:fixed;top:0;left:0;z-index:2147483647;background-color:#ffffff;"
     };
-    var l = Date.now();
-    var w = 0;
-    function d(n) {
+    var timestamp = Date.now();
+    var loadCount = 0;
+
+    // listen for postMessage from the challenge iframe
+    function onMessage(event) {
       try {
-        if (n.isTrusted && i.isTrustedOrigin(n.origin) && n.data) {
-          var r = JSON.parse(n.data);
-          if (r && r.eventType && r.responseType) {
-            switch (r.eventType) {
+        if (event.isTrusted && DataDomeUrlTools.isTrustedOrigin(event.origin) && event.data) {
+          var msg = JSON.parse(event.data);
+          if (msg && msg.eventType && msg.responseType) {
+            switch (msg.eventType) {
               case "load":
-                if (s) {
-                  e.dispatchEvent(e.eventNames.responseDisplayed, {
-                    responseType: r.responseType,
-                    responseUrl: r.responseUrl,
-                    rootElement: a || document.body
+                if (enableTagEvents) {
+                  tools.dispatchEvent(tools.eventNames.responseDisplayed, {
+                    responseType: msg.responseType,
+                    responseUrl: msg.responseUrl,
+                    rootElement: rootElement || document.body
                   });
                 }
-                if (w > 0) {
-                  document.getElementById("ddChallengeContainer" + l).style = a ? h.root : h.default;
+                // on subsequent loads (e.g. after captcha retry), re-apply the container style
+                if (loadCount > 0) {
+                  document.getElementById("ddChallengeContainer" + timestamp).style = rootElement ? styles.root : styles.default;
                 }
-                w++;
+                loadCount++;
                 break;
               case "passed":
-                var c = window.dataDomeOptions.sessionByHeader;
-                var o = window.dataDomeOptions.overrideCookieDomain;
-                var f = window.dataDomeOptions.disableAutoRefreshOnCaptchaPassed;
-                var u = window.dataDomeOptions.replayAfterChallenge;
-                function v() {
-                  if (c) {
-                    e.setDDSession(r.cookie);
+                var sessionByHeader = window.dataDomeOptions.sessionByHeader;
+                var overrideCookieDomain = window.dataDomeOptions.overrideCookieDomain;
+                var disableAutoRefresh = window.dataDomeOptions.disableAutoRefreshOnCaptchaPassed;
+                var replayAfterChallenge = window.dataDomeOptions.replayAfterChallenge;
+                function applyCookie() {
+                  if (sessionByHeader) {
+                    tools.setDDSession(msg.cookie);
                   }
-                  if (o) {
-                    r.cookie = e.replaceCookieDomain(r.cookie, window.location.hostname);
+                  if (overrideCookieDomain) {
+                    msg.cookie = tools.replaceCookieDomain(msg.cookie, window.location.hostname);
                   }
-                  e.setCookieWithFallback(r.cookie);
+                  tools.setCookieWithFallback(msg.cookie);
                 }
                 if (window.removeEventListener) {
-                  window.removeEventListener("message", d, false);
+                  window.removeEventListener("message", onMessage, false);
                 } else if (window.detachEvent) {
-                  window.detachEvent("onmessage", d);
+                  window.detachEvent("onmessage", onMessage);
                 }
-                if (!r.cookie) {
-                  if (r.url) {
+                if (!msg.cookie) {
+                  if (msg.url) {
                     setTimeout(function () {
                       window.location.reload();
                     }, 100);
                   }
                   return;
                 }
-                if (s) {
-                  v();
-                  e.dispatchEvent(e.eventNames.captchaPassed);
-                  e.dispatchEvent(e.eventNames.responsePassed, {
-                    responseType: r.responseType
+                if (enableTagEvents) {
+                  applyCookie();
+                  tools.dispatchEvent(tools.eventNames.captchaPassed);
+                  tools.dispatchEvent(tools.eventNames.responsePassed, {
+                    responseType: msg.responseType
                   });
                 }
                 setTimeout(function () {
-                  if (f) {
-                    var n = document.querySelector("iframe[src^=\"" + b + "\"]");
-                    if (n) {
-                      var i = n.parentNode;
-                      if (i && i.parentNode) {
-                        i.parentNode.removeChild(i);
+                  if (disableAutoRefresh) {
+                    var iframe = document.querySelector("iframe[src^=\"" + originalPageUrl + "\"]");
+                    if (iframe) {
+                      var container = iframe.parentNode;
+                      if (container && container.parentNode) {
+                        container.parentNode.removeChild(container);
                       }
                     }
-                    e.removeEventListener(window, "scroll", e.noscroll);
-                    var c = document.getElementById("ddStyleCaptchaBody" + l);
-                    v();
-                    if (c && c.parentNode) {
-                      c.parentNode.removeChild(c);
+                    tools.removeEventListener(window, "scroll", tools.noscroll);
+                    var styleEl = document.getElementById("ddStyleCaptchaBody" + timestamp);
+                    applyCookie();
+                    if (styleEl && styleEl.parentNode) {
+                      styleEl.parentNode.removeChild(styleEl);
                     }
                     window.DataDomeCaptchaDisplayed = false;
                     window.DataDomeResponseDisplayed = false;
-                    var o = document.querySelector("head");
-                    if (o != null && t != null) {
-                      o.removeChild(t);
+                    var head = document.querySelector("head");
+                    if (head != null && viewportMeta != null) {
+                      head.removeChild(viewportMeta);
                     }
-                    window.postMessage(e.eventNames.captchaPassed, window.origin);
-                    if (s) {
-                      e.dispatchEvent(e.eventNames.responseUnload, {
-                        responseType: r.responseType
+                    window.postMessage(tools.eventNames.captchaPassed, window.origin);
+                    if (enableTagEvents) {
+                      tools.dispatchEvent(tools.eventNames.responseUnload, {
+                        responseType: msg.responseType
                       });
                     }
-                    if (u) {
-                      e.dispatchEvent(e.internalEventNames.replayRequest);
+                    if (replayAfterChallenge) {
+                      tools.dispatchEvent(tools.internalEventNames.replayRequest);
                     }
                   } else {
-                    if (s) {
-                      e.dispatchEvent(e.eventNames.responseUnload, {
-                        responseType: r.responseType
+                    if (enableTagEvents) {
+                      tools.dispatchEvent(tools.eventNames.responseUnload, {
+                        responseType: msg.responseType
                       });
                     }
-                    v();
+                    applyCookie();
                     window.location.reload();
                   }
                 }, 500);
             }
           }
         }
-      } catch (n) {}
+      } catch (e) {}
     }
     if (window.addEventListener) {
-      window.addEventListener("message", d, false);
+      window.addEventListener("message", onMessage, false);
     } else if (window.attachEvent) {
-      window.attachEvent("onmessage", d);
+      window.attachEvent("onmessage", onMessage);
     }
     if (!window.DataDomeResponseDisplayed) {
-      var v;
-      var b = r;
-      v = f === undefined ? "ju" : f ? "js" : "jd";
-      var y = "allow-scripts allow-same-origin allow-forms" + (c.indexOf(window.ddjskey) > -1 ? " allow-popups" : "");
-      var p = "title=\"Verification system\" id=\"ddChallengeBody" + l + "\" width=\"100%\" height=\"100%\" sandbox=\"" + y + "\" allow=\"accelerometer; gyroscope; magnetometer\" FRAMEBORDER=\"0\" border=\"0\" scrolling=\"yes\" style=\"" + (a ? "" : "height:100vh;" + u) + "\"";
+      var deployMode;
+      var originalPageUrl = pageUrl;
+      // dm param: "ju" = unknown/standard, "js" = salesforce, "jd" = non-salesforce explicit
+      deployMode = isSalesforce === undefined ? "ju" : isSalesforce ? "js" : "jd";
+      var sandboxRules = "allow-scripts allow-same-origin allow-forms" + (POPUPS_ALLOWED_KEYS.indexOf(window.ddjskey) > -1 ? " allow-popups" : "");
+      var iframeAttrs = "title=\"Verification system\" id=\"ddChallengeBody" + timestamp + "\" width=\"100%\" height=\"100%\" sandbox=\"" + sandboxRules + "\" allow=\"accelerometer; gyroscope; magnetometer\" FRAMEBORDER=\"0\" border=\"0\" scrolling=\"yes\" style=\"" + (rootElement ? "" : "height:100vh;" + safariHeightFix) + "\"";
       try {
         if (typeof window.dataDomeOptions.challengeLanguage == "string") {
-          r += "&lang=" + encodeURIComponent(window.dataDomeOptions.challengeLanguage);
+          pageUrl += "&lang=" + encodeURIComponent(window.dataDomeOptions.challengeLanguage);
         }
-      } catch (n) {}
-      var m = "<iframe src=\"" + r + "&dm=" + v + "\" " + p + "></iframe>";
-      var F = o === e.ChallengeType.DEVICE_CHECK_INVISIBLE_MODE;
-      var L = "<div id=\"ddChallengeContainer" + l + "\" style=\"" + (F ? h.dcInvisible : a ? h.root : h.default) + "\">" + m + "</div>";
-      if (window.dataDomeOptions.sessionByHeader ? e.getDDSession() : e.getCookie()) {
-        if (!F) {
-          e.addEventListener(window, "scroll", e.noscroll);
-          e.noscroll();
+      } catch (e) {}
+      var iframeHtml = "<iframe src=\"" + pageUrl + "&dm=" + deployMode + "\" " + iframeAttrs + "></iframe>";
+      var isInvisible = challengeType === tools.ChallengeType.DEVICE_CHECK_INVISIBLE_MODE;
+      var containerHtml = "<div id=\"ddChallengeContainer" + timestamp + "\" style=\"" + (isInvisible ? styles.dcInvisible : rootElement ? styles.root : styles.default) + "\">" + iframeHtml + "</div>";
+      // only show challenge if user has a DataDome session
+      if (window.dataDomeOptions.sessionByHeader ? tools.getDDSession() : tools.getCookie()) {
+        if (!isInvisible) {
+          tools.addEventListener(window, "scroll", tools.noscroll);
+          tools.noscroll();
         }
-        if (a && a.insertAdjacentHTML) {
-          a.insertAdjacentHTML("afterbegin", L);
+        if (rootElement && rootElement.insertAdjacentHTML) {
+          rootElement.insertAdjacentHTML("afterbegin", containerHtml);
         } else {
-          if (!F) {
-            document.body.insertAdjacentHTML("beforeend", "<style id=\"ddStyleCaptchaBody" + l + "\"> html, body { margin: 0 !important; padding:0 !important; } body { height: 100vh !important; overflow: hidden; -webkit-transform: scale(1) !important; -moz-transform: scale(1) !important; transform: scale(1) !important; } </style>");
+          if (!isInvisible) {
+            document.body.insertAdjacentHTML("beforeend", "<style id=\"ddStyleCaptchaBody" + timestamp + "\"> html, body { margin: 0 !important; padding:0 !important; } body { height: 100vh !important; overflow: hidden; -webkit-transform: scale(1) !important; -moz-transform: scale(1) !important; transform: scale(1) !important; } </style>");
           }
-          document.body.insertAdjacentHTML("beforeend", L);
+          document.body.insertAdjacentHTML("beforeend", containerHtml);
         }
-        (t = document.createElement("meta")).name = "viewport";
-        t.content = "width=device-width, initial-scale=1.0";
-        var U = document.querySelector("head");
-        if (U != null) {
-          U.appendChild(t);
+        (viewportMeta = document.createElement("meta")).name = "viewport";
+        viewportMeta.content = "width=device-width, initial-scale=1.0";
+        var head = document.querySelector("head");
+        if (head != null) {
+          head.appendChild(viewportMeta);
         }
         window.DataDomeCaptchaDisplayed = true;
         window.DataDomeResponseDisplayed = true;
-        if (s) {
-          e.dispatchEvent(e.eventNames.captchaDisplayed, {
-            captchaUrl: r,
-            rootElement: a || document.body
+        if (enableTagEvents) {
+          tools.dispatchEvent(tools.eventNames.captchaDisplayed, {
+            captchaUrl: pageUrl,
+            rootElement: rootElement || document.body
           });
         }
       } else {
-        var A = "<div style=\"display:none;\">" + L + "</div>";
-        document.body.insertAdjacentHTML("beforeend", A);
-        if (s) {
-          e.dispatchEvent(e.eventNames.captchaError, {
-            captchaUrl: r,
-            rootElement: a || document.body,
+        // no session: hide the challenge, dispatch error
+        var hiddenHtml = "<div style=\"display:none;\">" + containerHtml + "</div>";
+        document.body.insertAdjacentHTML("beforeend", hiddenHtml);
+        if (enableTagEvents) {
+          tools.dispatchEvent(tools.eventNames.captchaError, {
+            captchaUrl: pageUrl,
+            rootElement: rootElement || document.body,
             reason: "DataDome session not found"
           });
-          e.dispatchEvent(e.eventNames.responseError, {
-            responseUrl: r,
-            rootElement: a || document.body,
+          tools.dispatchEvent(tools.eventNames.responseError, {
+            responseUrl: pageUrl,
+            rootElement: rootElement || document.body,
             reason: "DataDome session not found"
           });
         }
       }
     }
   };
-  this.displayResponsePagePublic = function (n, e) {
+  this.displayResponsePagePublic = function (url, root) {
     this.displayResponsePage({
-      responsePageUrl: n,
-      root: e
+      responsePageUrl: url,
+      root: root
     });
   }.bind(this);
 };
